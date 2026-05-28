@@ -2399,25 +2399,29 @@ var require_jszip_min = __commonJS({
 // public/js/gespreksverslag-docx.js
 var import_jszip = __toESM(require_jszip_min(), 1);
 var GESPREKSVERSLAG_FONT = "Century Gothic";
+var GESPREKSVERSLAG_TEMPLATE_URL = "/templates/gespreksverslag-template.dotx";
 var DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-var CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>`;
-var ROOT_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`;
-var DOCUMENT_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`;
+var TEMPLATE_MAIN_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml";
+var DOCUMENT_MAIN_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+var cachedTemplateBuffer = null;
+async function loadGespreksverslagTemplate(templateUrl = GESPREKSVERSLAG_TEMPLATE_URL) {
+  if (cachedTemplateBuffer) return cachedTemplateBuffer;
+  const response = await fetch(templateUrl);
+  if (!response.ok) {
+    throw new Error(`Gespreksverslag-template niet gevonden (${response.status}).`);
+  }
+  cachedTemplateBuffer = await response.arrayBuffer();
+  return cachedTemplateBuffer;
+}
+function clearGespreksverslagTemplateCache() {
+  cachedTemplateBuffer = null;
+}
 function escapeXmlText(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 function buildRunPropertiesXml(bold = false) {
   const boldXml = bold ? "<w:b/>" : "";
-  return `<w:rPr><w:rFonts w:ascii="${GESPREKSVERSLAG_FONT}" w:hAnsi="${GESPREKSVERSLAG_FONT}" w:cs="${GESPREKSVERSLAG_FONT}"/><w:sz w:val="22"/>${boldXml}</w:rPr>`;
+  return `<w:rPr><w:rFonts w:ascii="${GESPREKSVERSLAG_FONT}" w:hAnsi="${GESPREKSVERSLAG_FONT}" w:cs="${GESPREKSVERSLAG_FONT}"/><w:sz w:val="22"/><w:lang w:val="nl-NL"/>${boldXml}</w:rPr>`;
 }
 function buildTextRunXml(text, bold = false) {
   const safe = escapeXmlText(text || " ");
@@ -2440,7 +2444,7 @@ function buildParagraphXmlFromLine(line) {
 function buildParagraphXml(text, bold = false) {
   return `<w:p>${buildTextRunXml(text, bold)}</w:p>`;
 }
-function buildGespreksverslagDocumentXml(input) {
+function buildReportBodyParagraphsXml(input) {
   const paragraphs = [
     buildParagraphXml(
       `Notitietitel: ${input.meetingSubject.trim() || "Meeting"}`,
@@ -2455,30 +2459,90 @@ function buildGespreksverslagDocumentXml(input) {
   for (const line of input.reportBody.trim().split(/\r?\n/)) {
     paragraphs.push(buildParagraphXmlFromLine(line));
   }
+  return paragraphs.join("");
+}
+function mergeReportIntoTemplateDocument(documentXml, reportParagraphsXml) {
+  const bodyMatch = documentXml.match(/<w:body>([\s\S]*)<\/w:body>/);
+  if (!bodyMatch) {
+    throw new Error("Ongeldig Word-document: geen body gevonden.");
+  }
+  const bodyInner = bodyMatch[1];
+  const sectPrMatch = bodyInner.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/);
+  if (!sectPrMatch) {
+    throw new Error("Ongeldig template: sectPr ontbreekt.");
+  }
+  const sectPrXml = sectPrMatch[0];
+  const pageBreakMarker = '<w:br w:type="page"/>';
+  const pageBreakIdx = bodyInner.indexOf(pageBreakMarker);
+  if (pageBreakIdx < 0) {
+    throw new Error("Ongeldig template: pagina-einde voorblad ontbreekt.");
+  }
+  const coverEndIdx = bodyInner.indexOf("</w:p>", pageBreakIdx);
+  if (coverEndIdx < 0) {
+    throw new Error("Ongeldig template: einde voorblad niet gevonden.");
+  }
+  const coverEnd = coverEndIdx + "</w:p>".length;
+  const coverXml = bodyInner.slice(0, coverEnd);
+  const newBodyInner = `${coverXml}${reportParagraphsXml}${sectPrXml}`;
+  return documentXml.replace(bodyMatch[0], `<w:body>${newBodyInner}</w:body>`);
+}
+function buildGespreksverslagDocumentXml(input) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>${paragraphs.join("")}</w:body>
+  <w:body>${buildReportBodyParagraphsXml(input)}</w:body>
 </w:document>`;
 }
-async function buildGespreksverslagDocxBlob(input) {
-  const zip = new import_jszip.default();
-  zip.file("[Content_Types].xml", CONTENT_TYPES_XML);
-  zip.file("_rels/.rels", ROOT_RELS_XML);
-  zip.file("word/_rels/document.xml.rels", DOCUMENT_RELS_XML);
-  zip.file("word/document.xml", buildGespreksverslagDocumentXml(input));
+function convertTemplateContentTypesToDocument(contentTypesXml) {
+  return contentTypesXml.replace(
+    TEMPLATE_MAIN_CONTENT_TYPE,
+    DOCUMENT_MAIN_CONTENT_TYPE
+  );
+}
+async function buildGespreksverslagDocxFromTemplate(templateBuffer, input) {
+  const zip = await import_jszip.default.loadAsync(templateBuffer);
+  const documentFile = zip.file("word/document.xml");
+  if (!documentFile) {
+    throw new Error("Ongeldig template: word/document.xml ontbreekt.");
+  }
+  const documentXml = await documentFile.async("string");
+  const reportParagraphsXml = buildReportBodyParagraphsXml(input);
+  const mergedDocumentXml = mergeReportIntoTemplateDocument(
+    documentXml,
+    reportParagraphsXml
+  );
+  zip.file("word/document.xml", mergedDocumentXml);
+  const contentTypesFile = zip.file("[Content_Types].xml");
+  if (contentTypesFile) {
+    const contentTypesXml = await contentTypesFile.async("string");
+    zip.file(
+      "[Content_Types].xml",
+      convertTemplateContentTypesToDocument(contentTypesXml)
+    );
+  }
   return zip.generateAsync({
     type: "blob",
     mimeType: DOCX_MIME,
     compression: "DEFLATE"
   });
 }
+async function buildGespreksverslagDocxBlob(input, options = {}) {
+  const templateBuffer = options.templateBuffer ?? await loadGespreksverslagTemplate(options.templateUrl);
+  return buildGespreksverslagDocxFromTemplate(templateBuffer, input);
+}
 export {
   GESPREKSVERSLAG_FONT,
+  GESPREKSVERSLAG_TEMPLATE_URL,
   buildGespreksverslagDocumentXml,
   buildGespreksverslagDocxBlob,
+  buildGespreksverslagDocxFromTemplate,
   buildParagraphXml,
   buildParagraphXmlFromLine,
+  buildReportBodyParagraphsXml,
   buildRunPropertiesXml,
   buildTextRunXml,
-  escapeXmlText
+  clearGespreksverslagTemplateCache,
+  convertTemplateContentTypesToDocument,
+  escapeXmlText,
+  loadGespreksverslagTemplate,
+  mergeReportIntoTemplateDocument
 };
