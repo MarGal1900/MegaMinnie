@@ -47,12 +47,54 @@ export function buildRealtimeCallsRequest(sdp) {
 }
 
 /**
+ * @param {Record<string, unknown>} payload
+ * @returns {string}
+ */
+export function readRealtimeTranscriptText(payload) {
+  if (typeof payload?.transcript === "string" && payload.transcript.trim()) {
+    return payload.transcript.trim();
+  }
+  if (typeof payload?.text === "string" && payload.text.trim()) {
+    return payload.text.trim();
+  }
+  if (typeof payload?.delta === "string" && payload.delta.trim()) {
+    return payload.delta.trim();
+  }
+  const item = payload?.item;
+  if (item && typeof item === "object") {
+    const itemObj = item;
+    const fromNested = itemObj.input_audio_transcription;
+    if (
+      fromNested &&
+      typeof fromNested === "object" &&
+      typeof fromNested.transcript === "string" &&
+      fromNested.transcript.trim()
+    ) {
+      return fromNested.transcript.trim();
+    }
+    const content = Array.isArray(itemObj.content) ? itemObj.content : [];
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      if (typeof part.transcript === "string" && part.transcript.trim()) {
+        return part.transcript.trim();
+      }
+      if (typeof part.text === "string" && part.text.trim()) {
+        return part.text.trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
  * @typedef {{
  *   setStatus: (status: string) => void;
  *   onStateChange?: (state: { active: boolean; connecting: boolean }) => void;
  *   onError?: (message: string) => void;
  *   onDebugEvent?: (message: string) => void;
  *   onTranscriptUpdate?: (transcript: string) => void;
+ *   onTurn?: (turn: { role: "assistant"|"user"; text: string }) => void;
+ *   onSpeechStopped?: (context: { pendingUserText: string; transcript: string }) => void;
  * }} RealtimeInterviewOptions
  */
 
@@ -72,6 +114,9 @@ export function createRealtimeInterviewController(options) {
   let connecting = false;
   /** @type {{ role: "assistant"|"user"; text: string }[]} */
   let turns = [];
+  let pendingUserTranscript = "";
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let speechStoppedTimer = null;
 
   const setStatus = (status) => options.setStatus(status);
   const emitState = () => options.onStateChange?.({ active, connecting });
@@ -100,6 +145,7 @@ export function createRealtimeInterviewController(options) {
     const last = turns[turns.length - 1];
     if (last && last.role === role && last.text.toLowerCase() === text.toLowerCase()) return;
     turns.push({ role, text });
+    options.onTurn?.({ role, text });
     emitTranscript();
   };
 
@@ -121,6 +167,11 @@ export function createRealtimeInterviewController(options) {
   };
 
   const cleanup = () => {
+    if (speechStoppedTimer) {
+      clearTimeout(speechStoppedTimer);
+      speechStoppedTimer = null;
+    }
+    pendingUserTranscript = "";
     if (dataChannel) {
       try {
         dataChannel.close();
@@ -163,22 +214,25 @@ export function createRealtimeInterviewController(options) {
     const type = typeof payload?.type === "string" ? payload.type : "";
     /** @type {{ role: "assistant"|"user"; text: string }[]} */
     const extracted = [];
-    if (type === "conversation.item.input_audio_transcription.completed") {
-      if (typeof payload.transcript === "string" && payload.transcript.trim()) {
-        extracted.push({ role: "user", text: payload.transcript });
-      }
+    if (
+      type === "conversation.item.input_audio_transcription.completed" ||
+      type === "input_audio_transcription.completed"
+    ) {
+      const text = readRealtimeTranscriptText(payload);
+      if (text) extracted.push({ role: "user", text });
       return extracted;
     }
-    if (type === "response.audio_transcript.done") {
-      if (typeof payload.transcript === "string" && payload.transcript.trim()) {
-        extracted.push({ role: "assistant", text: payload.transcript });
-      }
+    if (
+      type === "response.audio_transcript.done" ||
+      type === "response.output_audio_transcript.done"
+    ) {
+      const text = readRealtimeTranscriptText(payload);
+      if (text) extracted.push({ role: "assistant", text });
       return extracted;
     }
     if (type === "response.output_text.done") {
-      if (typeof payload.text === "string" && payload.text.trim()) {
-        extracted.push({ role: "assistant", text: payload.text });
-      }
+      const text = readRealtimeTranscriptText(payload);
+      if (text) extracted.push({ role: "assistant", text });
       return extracted;
     }
 
@@ -202,9 +256,41 @@ export function createRealtimeInterviewController(options) {
     return extracted;
   };
 
+  const scheduleSpeechStopped = () => {
+    if (speechStoppedTimer) clearTimeout(speechStoppedTimer);
+    speechStoppedTimer = setTimeout(() => {
+      speechStoppedTimer = null;
+      const pendingUserText = pendingUserTranscript.replace(/\s+/g, " ").trim();
+      pendingUserTranscript = "";
+      options.onSpeechStopped?.({
+        pendingUserText,
+        transcript: buildTranscript(),
+      });
+    }, 900);
+  };
+
+  const handleTranscriptionSideEffects = (type, payload) => {
+    if (type === "conversation.item.input_audio_transcription.delta") {
+      const delta = typeof payload?.delta === "string" ? payload.delta : "";
+      if (delta) pendingUserTranscript += delta;
+      return;
+    }
+    if (
+      type === "conversation.item.input_audio_transcription.completed" ||
+      type === "input_audio_transcription.completed"
+    ) {
+      pendingUserTranscript = "";
+      return;
+    }
+    if (type === "input_audio_buffer.speech_stopped") {
+      scheduleSpeechStopped();
+    }
+  };
+
   const handleDataEvent = (eventType) => {
     if (!eventType) return;
     if (eventType === "input_audio_buffer.speech_started") {
+      pendingUserTranscript = "";
       setStatus("Luistert…");
       return;
     }
@@ -243,6 +329,7 @@ export function createRealtimeInterviewController(options) {
         const type = typeof payload?.type === "string" ? payload.type : "";
         if (type) {
           emitDebug(`Realtime event: ${type}`);
+          handleTranscriptionSideEffects(type, payload);
           handleDataEvent(type);
           const extractedTurns = extractTurnsFromPayload(payload);
           for (const turn of extractedTurns) {
@@ -375,6 +462,7 @@ export function createRealtimeInterviewController(options) {
     start,
     stop,
     consumeTranscript,
+    getTranscript: () => buildTranscript().trim(),
     isActive: () => active,
     isConnecting: () => connecting,
   };

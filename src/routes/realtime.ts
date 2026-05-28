@@ -3,6 +3,7 @@ import {
   getOpenAiApiKey,
   getRealtimeInstructions,
   getRealtimeModel,
+  getRealtimeTranscriptionModel,
   getRealtimeVoice,
   isRealtimeInterviewEnabled,
 } from "../lib/realtime-config.js";
@@ -20,8 +21,39 @@ type RealtimeSessionCreateOptions = {
   model: string;
   voice: string;
   instructions: string;
+  transcriptionModel: string;
   fetchImpl?: typeof fetch;
 };
+
+/** Session payload for GA client_secrets (exported for tests). */
+export function buildRealtimeSessionPayload(params: {
+  model: string;
+  voice: string;
+  instructions: string;
+  transcriptionModel: string;
+}) {
+  return {
+    session: {
+      type: "realtime",
+      model: params.model,
+      instructions: params.instructions,
+      audio: {
+        input: {
+          turn_detection: {
+            type: "server_vad",
+          },
+          transcription: {
+            model: params.transcriptionModel,
+            language: "nl",
+          },
+        },
+        output: {
+          voice: params.voice,
+        },
+      },
+    },
+  };
+}
 
 type RealtimeSessionPrereqResult =
   | { ok: true }
@@ -115,7 +147,7 @@ function extractClientSecretPayload(body: unknown): {
 export async function createRealtimeSession(
   opts: RealtimeSessionCreateOptions,
 ): Promise<RealtimeSessionSuccess> {
-  const { apiKey, model, voice, instructions, fetchImpl = fetch } = opts;
+  const { apiKey, model, voice, instructions, transcriptionModel, fetchImpl = fetch } = opts;
   if (!apiKey.trim()) {
     throw new Error("OPENAI_API_KEY ontbreekt voor Realtime sessies.");
   }
@@ -126,23 +158,9 @@ export async function createRealtimeSession(
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      session: {
-        type: "realtime",
-        model,
-        instructions,
-        audio: {
-          input: {
-            turn_detection: {
-              type: "server_vad",
-            },
-          },
-          output: {
-            voice,
-          },
-        },
-      },
-    }),
+    body: JSON.stringify(
+      buildRealtimeSessionPayload({ model, voice, instructions, transcriptionModel }),
+    ),
   });
 
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -181,6 +199,7 @@ realtimeRouter.post("/session", async (_req, res, next) => {
       model: getRealtimeModel(),
       voice: getRealtimeVoice(),
       instructions: getRealtimeInstructions(),
+      transcriptionModel: getRealtimeTranscriptionModel(),
     });
 
     res.json({

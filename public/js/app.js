@@ -19,8 +19,12 @@ import {
 } from "./tasks-events.js";
 import {
   initConversationRecording,
+  startConversationRecording,
+  beginConversationCapture,
+  stopConversationRecording,
   cancelConversationRecording,
   isConversationActive,
+  isConversationRecording,
 } from "./conversation-recording.js";
 import { createRealtimeInterviewController } from "./realtime-interview.js";
 import { initShareReportEmail } from "./share-report-email.js";
@@ -367,6 +371,16 @@ const btnPickFiles = $("btn-pick-files");
 const recordHint = $("record-hint");
 let realtimeController = null;
 let lastRealtimeTranscript = "";
+/** @type {"realtime-qa"|"conversation"} */
+let conversationPanelMode = "conversation";
+let realtimeInterviewEnabled = true;
+let realtimeAutoFinishing = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let realtimeFinishCheckTimer = null;
+
+const REALTIME_FINISH_COMMAND_RE =
+  /\b(stop|stoppen|afronden|rond af|klaar|einde gesprek|einde verslag|verslag klaar)\b/i;
+const REALTIME_FINISH_SHORT_RE = /^(stop|stoppen|afronden|klaar)$/i;
 
 function setInterviewButtonUi(active) {
   btnInvoer?.classList.toggle("is-recording", active);
@@ -389,6 +403,10 @@ function isRealtimeConversationRunning() {
   return Boolean(realtimeController?.isActive() || realtimeController?.isConnecting());
 }
 
+function isConversationPanelRecording() {
+  return isRealtimeConversationRunning() || isConversationRecording();
+}
+
 function stopRealtimeInterview(status = "Gestopt") {
   realtimeController?.stop(status);
 }
@@ -402,6 +420,8 @@ async function processRealtimeConversationTranscript(transcript) {
     );
     return;
   }
+
+  await persistConversationTranscript(cleanedTranscript, { kind: "realtime-qa" });
 
   const processId = ++activeProcessId;
   const { requestId, signal } = beginRequest();
@@ -457,11 +477,91 @@ async function processRealtimeConversationTranscript(transcript) {
   }
 }
 
+function isRealtimeFinishVoiceCommand(text) {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?,;:]+$/g, "")
+    .trim();
+  if (!normalized) return false;
+  if (REALTIME_FINISH_SHORT_RE.test(normalized)) return true;
+  return REALTIME_FINISH_COMMAND_RE.test(normalized);
+}
+
+function extractLastRealtimeUserText(transcript) {
+  const lines = String(transcript || "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    const match = line.match(/^\[Gebruiker\]:\s*(.+)$/i);
+    if (match?.[1]) return match[1].trim();
+  }
+  return "";
+}
+
+function maybeAutoFinishRealtimeQa(sourceText) {
+  if (conversationPanelMode !== "realtime-qa") return;
+  if (!isRealtimeConversationRunning()) return;
+  if (realtimeAutoFinishing) return;
+  const text = String(sourceText || "").trim();
+  if (!text) return;
+  if (isRealtimeFinishVoiceCommand(text)) {
+    finalizeRealtimeQaConversation({ fromVoice: true });
+  }
+}
+
+function scheduleRealtimeFinishCheckFromTranscript(transcript) {
+  if (realtimeFinishCheckTimer) clearTimeout(realtimeFinishCheckTimer);
+  realtimeFinishCheckTimer = setTimeout(() => {
+    realtimeFinishCheckTimer = null;
+    maybeAutoFinishRealtimeQa(extractLastRealtimeUserText(transcript));
+  }, 350);
+}
+
+function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
+  if (realtimeAutoFinishing) return;
+  realtimeAutoFinishing = true;
+  if (realtimeFinishCheckTimer) {
+    clearTimeout(realtimeFinishCheckTimer);
+    realtimeFinishCheckTimer = null;
+  }
+
+  const completeFinalize = () => {
+    const transcript = realtimeController?.consumeTranscript() || lastRealtimeTranscript || "";
+    lastRealtimeTranscript = "";
+    stopRealtimeInterview(fromVoice ? "Stopcommando herkend — verwerken…" : "Gestopt");
+    showConversationPanel(false);
+    setConversationRecordingUi(false);
+    updateProcessUi();
+    if (transcript.trim()) {
+      void processRealtimeConversationTranscript(transcript).finally(() => {
+        realtimeAutoFinishing = false;
+      });
+      return;
+    }
+    realtimeAutoFinishing = false;
+    if (fromVoice) {
+      showFeedback(
+        "Stopcommando gehoord, maar er is nog geen transcript. Druk op STOP om opnieuw te proberen.",
+        "error",
+      );
+      return;
+    }
+    showFeedback("Realtime gesprek gestopt.", "success");
+  };
+
+  if (fromVoice && isRealtimeConversationRunning()) {
+    setRealtimeStatus("Stopcommando herkend — afronden…");
+    setTimeout(completeFinalize, 1200);
+    return;
+  }
+
+  completeFinalize();
+}
+
 /** @param {boolean} visible */
 function showConversationPanel(visible) {
   if (!conversationPanel) return;
   conversationPanel.hidden = !visible;
-  conversationPanel.classList.toggle("is-recording", isRealtimeConversationRunning());
+  conversationPanel.classList.toggle("is-recording", isConversationPanelRecording());
   if (!visible) {
     if (conversationTimer) conversationTimer.textContent = "00:00";
     if (conversationLevelBar) conversationLevelBar.style.width = "0%";
@@ -491,7 +591,7 @@ function updateConversationAudioLevel(level) {
 function setConversationStatus(message, phase = null) {
   if (!conversationStatus) return;
   conversationStatus.textContent = message;
-  conversationStatus.classList.toggle("is-recording", phase === null && isRealtimeConversationRunning());
+  conversationStatus.classList.toggle("is-recording", phase === null && isConversationPanelRecording());
 }
 
 /** @param {boolean} recording */
@@ -735,10 +835,11 @@ async function listTestRecordings() {
   }
 }
 
-/** @param {{ id: string; name: string; kind: "interview"|"upload"|"photo"; blob?: Blob; photos?: { name: string; blob: Blob; mimeType?: string }[]; savedAt?: number }} entry */
+/** @param {{ id: string; name: string; kind: "interview"|"upload"|"photo"|"realtime-qa"|"conversation"; blob?: Blob; transcript?: string; photos?: { name: string; blob: Blob; mimeType?: string }[]; savedAt?: number }} entry */
 async function saveTestRecording(entry) {
   if (!state.keepInput) return;
-  if (!entry.blob?.size && !entry.photos?.length) return;
+  const hasTranscript = Boolean(String(entry.transcript || "").trim());
+  if (!entry.blob?.size && !entry.photos?.length && !hasTranscript) return;
   try {
     const db = await openTestAudioDb();
     await new Promise((resolve, reject) => {
@@ -787,7 +888,11 @@ async function updateTestRecordingName(id, name) {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
-    if (!existing?.blob?.size && !existing?.photos?.length) {
+    if (
+      !existing?.blob?.size &&
+      !existing?.photos?.length &&
+      !String(existing?.transcript || "").trim()
+    ) {
       db.close();
       return;
     }
@@ -895,6 +1000,10 @@ function useTestLibraryItem(rec) {
     useTestPhotos(rec);
     return;
   }
+  if (rec.kind === "realtime-qa" || rec.kind === "conversation") {
+    void useTestConversationTranscript(rec);
+    return;
+  }
   if (rec.blob?.size) useTestRecording(rec);
 }
 
@@ -911,7 +1020,7 @@ function useTestRecording(rec) {
   hideInputFeedback();
 }
 
-/** @param {{ id: string; name: string; kind: string; blob?: Blob; photos?: { name: string; blob: Blob; mimeType?: string }[] }} rec */
+/** @param {{ id: string; name: string; kind: string; blob?: Blob; transcript?: string; photos?: { name: string; blob: Blob; mimeType?: string }[] }} rec */
 function startTestRecordingProcess(rec) {
   if (
     inputPanel?.classList.contains("is-input-busy") ||
@@ -920,6 +1029,17 @@ function startTestRecordingProcess(rec) {
     return;
   }
   stopTestRecordingPreview();
+  if (rec.kind === "realtime-qa" || rec.kind === "conversation") {
+    void (async () => {
+      const transcript = await readTestTranscript(rec);
+      if (!transcript) {
+        showInputFeedback("Geen transcript om te verwerken.", "error");
+        return;
+      }
+      void processRealtimeConversationTranscript(transcript);
+    })();
+    return;
+  }
   useTestLibraryItem(rec);
   void processReport();
 }
@@ -945,10 +1065,13 @@ async function renderTestRecordingsPicker() {
     const li = document.createElement("li");
     li.className = "test-rec";
     li.dataset.recId = rec.id;
+    const isTranscriptKind = rec.kind === "realtime-qa" || rec.kind === "conversation";
     const listenBtn =
       rec.kind === "photo"
         ? ""
-        : `<button type="button" class="test-rec__icon" data-action="listen" data-rec-id="${escapeHtml(rec.id)}" title="Afluisteren" aria-label="Afluisteren">${TEST_REC_ICON_PLAY}</button>`;
+        : isTranscriptKind
+          ? `<button type="button" class="test-rec__icon" data-action="view" data-rec-id="${escapeHtml(rec.id)}" title="Transcript bekijken" aria-label="Transcript bekijken">${TEST_REC_ICON_EDIT}</button>`
+          : `<button type="button" class="test-rec__icon" data-action="listen" data-rec-id="${escapeHtml(rec.id)}" title="Afluisteren" aria-label="Afluisteren">${TEST_REC_ICON_PLAY}</button>`;
     li.innerHTML = `
       <button type="button" class="test-rec__name" title="Alleen laden in invoer">${escapeHtml(rec.name)}</button>
       <span class="test-rec__tools">
@@ -974,6 +1097,12 @@ async function renderTestRecordingsPicker() {
       e.preventDefault();
       e.stopPropagation();
       listenTestRecording(rec, e.currentTarget instanceof HTMLButtonElement ? e.currentTarget : null);
+    });
+
+    li.querySelector('[data-action="view"]')?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void useTestConversationTranscript(rec);
     });
 
     li.querySelector('[data-action="delete"]')?.addEventListener("click", (e) => {
@@ -1061,6 +1190,68 @@ async function persistTestAudio(blob, name) {
     kind: "upload",
     blob,
   });
+}
+
+/** @param {{ id: string; name: string; kind: string; blob?: Blob; transcript?: string }} rec */
+async function readTestTranscript(rec) {
+  if (typeof rec.transcript === "string" && rec.transcript.trim()) {
+    return rec.transcript.trim();
+  }
+  if (rec.blob?.size) {
+    try {
+      return (await rec.blob.text()).trim();
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+/**
+ * Bewaar gesprekstranscript in testmodus (IndexedDB).
+ * @param {string} transcript
+ * @param {{ kind: "realtime-qa"|"conversation"; partial?: boolean }} opts
+ */
+async function persistConversationTranscript(transcript, { kind, partial = false }) {
+  if (!state.keepInput) return;
+  const cleaned = String(transcript || "").trim();
+  if (!cleaned) return;
+  const stamp = new Date().toLocaleString("nl-NL", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+  const label =
+    kind === "realtime-qa"
+      ? partial
+        ? "Vraag & Antwoord (deels)"
+        : "Vraag & Antwoord"
+      : partial
+        ? "Opname gesprek (deels)"
+        : "Opname gesprek";
+  await saveTestRecording({
+    id: `rec-${Date.now()}`,
+    name: `${label} ${stamp}`,
+    kind,
+    transcript: cleaned,
+    blob: new Blob([cleaned], { type: "text/plain;charset=utf-8" }),
+  });
+  showInputFeedback(`${label} opgeslagen in testmodus.`, "success");
+}
+
+/** @param {{ id: string; name: string; kind: string; blob?: Blob; transcript?: string }} rec */
+async function useTestConversationTranscript(rec) {
+  const text = await readTestTranscript(rec);
+  if (!text) {
+    showInputFeedback("Geen transcript in dit testbestand.", "error");
+    return;
+  }
+  clearInputExcept("text");
+  if (textInput) textInput.value = text;
+  showManualPanel();
+  setActiveInputKind("text");
+  hideInputFeedback();
+  renderAttachments();
+  updateProcessUi();
 }
 
 async function restoreTestAudio() {
@@ -2111,8 +2302,8 @@ function updateTestModeUi() {
     btnTestMode.classList.toggle("is-active", state.keepInput);
     btnTestMode.textContent = state.keepInput ? "Testmodus: aan" : "Testmodus: uit";
     btnTestMode.title = state.keepInput
-      ? "Testmodus aan — nieuwe opnames worden opgeslagen. Bibliotheek blijft bewaard."
-      : "Testmodus uit — opgeslagen testopnames blijven staan (alleen prullenbak verwijdert). Invoer wordt na verwerking gewist.";
+      ? "Testmodus aan — opnames en gesprekstranscripten worden opgeslagen. Bibliotheek blijft bewaard."
+      : "Testmodus uit — opgeslagen testbestanden blijven staan (alleen prullenbak verwijdert). Invoer wordt na verwerking gewist.";
   }
 }
 
@@ -3007,8 +3198,9 @@ async function loadHealth() {
     state.keepInput = readTestModePreference(Boolean(data.keepInput));
     state.salesforceConfigured = Boolean(data.salesforceConfigured);
     const realtimeEnabled = data.realtimeInterviewEnabled !== false;
-    if (btnConversation) btnConversation.toggleAttribute("disabled", !realtimeEnabled);
-    if (!realtimeEnabled && !conversationPanel?.hidden) {
+    realtimeInterviewEnabled = realtimeEnabled;
+    if (btnInvoer) btnInvoer.toggleAttribute("disabled", !realtimeEnabled);
+    if (!realtimeEnabled && !conversationPanel?.hidden && conversationPanelMode === "realtime-qa") {
       stopRealtimeInterview("Realtime uitgeschakeld");
       showConversationPanel(false);
     }
@@ -3082,9 +3274,12 @@ async function loadHealth() {
   } catch {
     badge.textContent = "Offline";
     badge.className = "badge badge--muted";
-    if (btnConversation) btnConversation.setAttribute("disabled", "");
+    realtimeInterviewEnabled = false;
+    if (btnInvoer) btnInvoer.setAttribute("disabled", "");
     stopRealtimeInterview("Niet verbonden");
-    showConversationPanel(false);
+    if (conversationPanelMode === "realtime-qa") {
+      showConversationPanel(false);
+    }
     updateTestModeUi();
   }
 }
@@ -3153,58 +3348,86 @@ btnTestMode?.addEventListener("click", (e) => {
 btnInvoer?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
-  if (state.interview.active) {
-    cancelInterview();
+  if (!realtimeInterviewEnabled) {
+    if (state.interview.active) {
+      cancelInterview();
+      return;
+    }
+    if (isConversationActive()) cancelConversationRecording();
+    if (isRealtimeConversationRunning()) stopRealtimeInterview();
+    showConversationPanel(false);
+    void startInterview();
     return;
   }
-  if (isConversationActive()) {
-    cancelConversationRecording();
-  }
+  conversationPanelMode = "realtime-qa";
+  if (state.interview.active) cancelInterview();
+  if (isConversationActive()) cancelConversationRecording();
   if (isRealtimeConversationRunning()) {
     stopRealtimeInterview();
+    showConversationPanel(false);
+    return;
   }
-  showConversationPanel(false);
-  void startInterview();
+  showInterviewPanel(false);
+  showConversationPanel(true);
+  setConversationStatus("Druk op START om realtime Vraag & Antwoord te beginnen.");
+  updateProcessUi();
 });
 
 btnConversation?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
+  conversationPanelMode = "conversation";
   if (state.interview.active) {
     cancelInterview();
   }
+  if (isRealtimeConversationRunning()) {
+    stopRealtimeInterview();
+  }
+  if (isConversationRecording()) {
+    void stopConversationRecording();
+    return;
+  }
   if (conversationPanel?.hidden) {
     showInterviewPanel(false);
-    setConversationStatus("Druk op START om het gesprek te beginnen.");
-    showConversationPanel(true);
+    void startConversationRecording();
   } else {
-    stopRealtimeInterview();
-    showConversationPanel(false);
+    cancelConversationRecording();
   }
 });
 
 btnConversationStart?.addEventListener("click", (e) => {
   e.preventDefault();
-  lastRealtimeTranscript = "";
-  void realtimeController?.start();
+  realtimeAutoFinishing = false;
+  if (conversationPanelMode === "realtime-qa") {
+    lastRealtimeTranscript = "";
+    void realtimeController?.start();
+    return;
+  }
+  void beginConversationCapture();
 });
 
 btnConversationStop?.addEventListener("click", (e) => {
   e.preventDefault();
-  const transcript = realtimeController?.consumeTranscript() || lastRealtimeTranscript || "";
-  lastRealtimeTranscript = "";
-  stopRealtimeInterview();
-  if (transcript.trim()) {
-    void processRealtimeConversationTranscript(transcript);
-  } else {
-    showFeedback("Realtime gesprek gestopt.", "success");
+  if (conversationPanelMode !== "realtime-qa") {
+    void stopConversationRecording();
+    return;
   }
+  finalizeRealtimeQaConversation();
 });
 
 btnConversationCancel?.addEventListener("click", (e) => {
   e.preventDefault();
+  if (conversationPanelMode !== "realtime-qa") {
+    cancelConversationRecording();
+    return;
+  }
+  const partial =
+    realtimeController?.getTranscript?.() || lastRealtimeTranscript || "";
   stopRealtimeInterview();
   showConversationPanel(false);
+  if (partial.trim()) {
+    void persistConversationTranscript(partial, { kind: "realtime-qa", partial: true });
+  }
 });
 
 btnInterviewNext?.addEventListener("click", (e) => {
@@ -4185,11 +4408,20 @@ function updateProcessUi() {
   if (conversationPanel && !conversationPanel.hidden) {
     btnProcess.disabled = true;
     if (processHint) {
-      if (realtimeController?.isConnecting()) {
-        processHint.textContent = "Realtime gesprek verbinden…";
-      } else if (isRealtimeConversationRunning()) {
+      if (conversationPanelMode === "realtime-qa") {
+        if (realtimeController?.isConnecting()) {
+          processHint.textContent = "Realtime Vraag & Antwoord verbinden…";
+        } else if (isRealtimeConversationRunning()) {
+          processHint.textContent =
+            "Realtime Vraag & Antwoord loopt — zeg “stop” of druk op STOP; daarna werkt MegaMinnie automatisch uit.";
+        } else {
+          processHint.textContent = "Druk op START om realtime Vraag & Antwoord te starten.";
+        }
+      } else if (isConversationRecording()) {
         processHint.textContent =
           "Gespreksopname loopt — druk op STOP als de afspraak klaar is.";
+      } else if (isConversationActive()) {
+        processHint.textContent = "Gesprek wordt verwerkt…";
       } else {
         processHint.textContent = "Druk op START om het gesprek op te nemen.";
       }
@@ -4731,6 +4963,9 @@ initConversationRecording({
   beginRequest,
   isRequestActive,
   clearInputExceptVoice: () => clearInputExcept("voice"),
+  onTranscriptReady: (transcript) => {
+    void persistConversationTranscript(transcript, { kind: "conversation" });
+  },
   onResult: (result) => {
     state.lastResult = result;
     updateFlowSteps();
@@ -4748,6 +4983,7 @@ initConversationRecording({
 realtimeController = createRealtimeInterviewController({
   setStatus: setRealtimeStatus,
   onStateChange: (rtState) => {
+    if (conversationPanelMode !== "realtime-qa") return;
     setConversationRecordingUi(Boolean(rtState.active || rtState.connecting));
     if (!rtState.active && !rtState.connecting && !conversationPanel?.hidden) {
       setConversationStatus("Druk op START om het gesprek te beginnen.");
@@ -4756,6 +4992,20 @@ realtimeController = createRealtimeInterviewController({
   },
   onTranscriptUpdate: (transcript) => {
     lastRealtimeTranscript = transcript;
+    if (conversationPanelMode !== "realtime-qa") return;
+    scheduleRealtimeFinishCheckFromTranscript(transcript);
+  },
+  onTurn: (turn) => {
+    if (conversationPanelMode !== "realtime-qa") return;
+    if (turn.role !== "user") return;
+    if (!isRealtimeConversationRunning()) return;
+    maybeAutoFinishRealtimeQa(turn.text);
+  },
+  onSpeechStopped: ({ pendingUserText, transcript }) => {
+    if (conversationPanelMode !== "realtime-qa") return;
+    if (!isRealtimeConversationRunning()) return;
+    maybeAutoFinishRealtimeQa(pendingUserText);
+    scheduleRealtimeFinishCheckFromTranscript(transcript);
   },
   onError: (message) => {
     setRealtimeStatus("Fout bij realtime sessie");

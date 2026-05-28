@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildRealtimeSessionPayload,
   createRealtimeSession,
   validateRealtimeSessionPrereqs,
 } from "../src/routes/realtime.js";
@@ -12,6 +13,7 @@ describe("createRealtimeSession", () => {
         model: "gpt-realtime",
         voice: "alloy",
         instructions: "test",
+        transcriptionModel: "gpt-4o-mini-transcribe",
       }),
     ).rejects.toThrow("OPENAI_API_KEY ontbreekt");
   });
@@ -33,6 +35,7 @@ describe("createRealtimeSession", () => {
       model: "gpt-realtime-mini",
       voice: "verse",
       instructions: "test",
+      transcriptionModel: "gpt-4o-mini-transcribe",
       fetchImpl: fetchMock as unknown as typeof fetch,
     });
 
@@ -47,6 +50,10 @@ describe("createRealtimeSession", () => {
     const body = JSON.parse(String(init.body ?? "{}"));
     expect(body.session?.turn_detection).toBeUndefined();
     expect(body.session?.audio?.input?.turn_detection?.type).toBe("server_vad");
+    expect(body.session?.audio?.input?.transcription).toEqual({
+      model: "gpt-4o-mini-transcribe",
+      language: "nl",
+    });
 
     expect(result).toEqual({
       clientSecret: "ephemeral_secret_abc",
@@ -71,11 +78,27 @@ describe("createRealtimeSession", () => {
       model: "gpt-realtime-mini",
       voice: "verse",
       instructions: "test",
+      transcriptionModel: "gpt-4o-mini-transcribe",
       fetchImpl: fetchMock as unknown as typeof fetch,
     });
 
     expect(result.clientSecret).toBe("ephemeral_from_data");
     expect(result.expiresAt).toBe(44);
+  });
+});
+
+describe("buildRealtimeSessionPayload", () => {
+  it("zet input transcriptie aan voor stop-herkenning", () => {
+    const payload = buildRealtimeSessionPayload({
+      model: "gpt-realtime-mini",
+      voice: "verse",
+      instructions: "test",
+      transcriptionModel: "gpt-4o-mini-transcribe",
+    });
+    expect(payload.session.audio.input.transcription).toEqual({
+      model: "gpt-4o-mini-transcribe",
+      language: "nl",
+    });
   });
 });
 
