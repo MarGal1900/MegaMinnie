@@ -13,9 +13,7 @@ import {
   detectInterviewCommandAtTail,
   detectRealtimeQaVoiceCommand,
   detectReviewVoiceCommand,
-  isReviewCorrectieCommand,
   parseAnswerTranscript,
-  startsWithReviewCorrectieCommand,
   stripReviewVoiceCommand,
 } from "./interview-commands.js";
 import {
@@ -32,8 +30,8 @@ import {
   isConversationActive,
   isConversationRecording,
 } from "./conversation-recording.js";
-import { createRealtimeInterviewController } from "./realtime-interview.js";
-import { createOpenAiSpeechPlayback, prefetchOpenAiSpeech } from "./openai-speech.js";
+import { createRealtimeInterviewController, REALTIME_QA_OPENING_TEXT } from "./realtime-interview.js";
+import { createOpenAiSpeechPlayback, playOpenAiSpeechOnce, prefetchOpenAiSpeech } from "./openai-speech.js";
 import { initShareReportEmail } from "./share-report-email.js";
 
 /** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string; assignee?: string; ownerId?: string }} Task */
@@ -47,7 +45,7 @@ import { initShareReportEmail } from "./share-report-email.js";
 
 /** Verwerkings-GIF (zelfde asset in prod én test; versie bumpen bij deploy). */
 const MEGAMINNIE_PROCESSING_GIF = "/images/megaminnie-animated-web.gif";
-const MEGAMINNIE_PROCESSING_GIF_VERSION = 15;
+const MEGAMINNIE_PROCESSING_GIF_VERSION = 17;
 
 const state = {
   recording: false,
@@ -96,6 +94,7 @@ const state = {
     /** @type {string[]} */
     chunkParagraphKeys: [],
     ttsActive: false,
+    lastSpokenChunk: "",
   },
   interview: {
     active: false,
@@ -372,7 +371,6 @@ const manualProcessSlot = $("manual-process-slot");
 const btnInvoer = $("btn-invoer");
 const btnConversation = $("btn-conversation");
 const conversationLabel = $("conversation-label");
-const btnPickFiles = $("btn-pick-files");
 const recordHint = $("record-hint");
 let realtimeController = null;
 /** @type {ReturnType<typeof createRealtimeInterviewController> | null} */
@@ -401,10 +399,13 @@ const INLINE_CORRECTION_RESUME_MS = 5500;
 const INLINE_CORRECTION_EMPTY_RESUME_MS = 1200;
 const INLINE_INTERRUPT_CONFIRM_MS = 450;
 
-const REVIEW_PLAYBACK_STATUS =
-  'Zeg "Correctie" of spreek om te corrigeren — "Voorlezen" om verder te lezen';
+/** Passief Realtime-luisteren tijdens voorlezen; spraakcommando "Correctie" + live /extend. */
+const REVIEW_INLINE_LISTEN_ENABLED = true;
+
+const REVIEW_PLAYBACK_STATUS = "";
 /** @type {ReturnType<typeof createOpenAiSpeechPlayback> | null} */
 let reviewSpeechPlayer = null;
+let reviewPlaybackSessionId = 0;
 let lastRealtimeTranscript = "";
 /** @type {"realtime-qa"|"conversation"} */
 let conversationPanelMode = "conversation";
@@ -412,6 +413,7 @@ let realtimeInterviewEnabled = true;
 let realtimeAutoFinishing = false;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let realtimeFinishCheckTimer = null;
+let realtimeQaDraftActive = false;
 
 function setInterviewButtonUi(active) {
   btnInvoer?.classList.toggle("is-recording", active);
@@ -453,6 +455,124 @@ function stopRealtimeInterview(status = "Gestopt") {
   realtimeController?.stop(status);
 }
 
+function formatRealtimeQaTranscriptForNote(transcript) {
+  const lines = String(transcript || "")
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  return lines
+    .map((line) => {
+      const user = line.match(/^\[Gebruiker\]:\s*(.+)$/i);
+      if (user?.[1]) return `Jij: ${user[1].trim()}`;
+      const assistant = line.match(/^\[Assistent\]:\s*(.+)$/i);
+      if (assistant?.[1]) return `MegaMinnie: ${assistant[1].trim()}`;
+      return line;
+    })
+    .join("\n\n");
+}
+
+function setNoteBodyPlainText(text, placeholder = "") {
+  const el = $("note-body");
+  if (!el) return;
+  const content = String(text || "").trim();
+  if ("value" in el && typeof el.value === "string") {
+    el.value = content;
+    el.placeholder = content ? "" : placeholder;
+  } else if (content) {
+    el.textContent = content;
+    el.removeAttribute("data-placeholder");
+  } else {
+    el.textContent = "";
+    if (placeholder) el.setAttribute("data-placeholder", placeholder);
+    else el.removeAttribute("data-placeholder");
+  }
+  resizeNoteBody();
+}
+
+function setRealtimeQaDraftEditing(enabled) {
+  const title = $("note-title");
+  const body = $("note-body");
+  if (enabled) {
+    title?.removeAttribute("contenteditable");
+    body?.removeAttribute("contenteditable");
+  } else {
+    title?.setAttribute("contenteditable", "true");
+    body?.setAttribute("contenteditable", "true");
+  }
+}
+
+function renderRealtimeQaDraft(transcript) {
+  realtimeQaDraftActive = true;
+  if (outputPanel) outputPanel.hidden = false;
+  mainLayout?.classList.toggle("layout--single", false);
+  const resultArea = $("result-area");
+  if (resultArea) {
+    resultArea.hidden = false;
+    resultArea.classList.add("is-realtime-qa-draft");
+  }
+  if (reviewSection) reviewSection.hidden = true;
+  $("tasks-section").hidden = true;
+  $("events-section").hidden = true;
+  $("tasks-events-actions").hidden = true;
+
+  setNoteTitle("Vraag & Antwoord — live");
+  const formatted = formatRealtimeQaTranscriptForNote(transcript);
+  setNoteBodyPlainText(
+    formatted,
+    "Gesprek gestart — spreek je antwoord in. Zeg “stop” om uit te werken.",
+  );
+  setRealtimeQaDraftEditing(true);
+  updateSyncButton();
+  updateOutputVisibility();
+  if (formatted) {
+    const body = $("note-body");
+    body?.scrollTo?.({ top: body.scrollHeight, behavior: "smooth" });
+  }
+}
+
+function endRealtimeQaDraft({ restoreResult = true } = {}) {
+  realtimeQaDraftActive = false;
+  $("result-area")?.classList.remove("is-realtime-qa-draft");
+  setRealtimeQaDraftEditing(false);
+  if (restoreResult && state.lastResult) {
+    renderResult(state.lastResult);
+    return;
+  }
+  if (!state.lastResult) {
+    clearResultFields();
+  }
+  updateOutputVisibility();
+  updateSyncButton();
+}
+
+function beginRealtimeQaDraft() {
+  renderRealtimeQaDraft("");
+}
+
+function updateRealtimeQaDraft(transcript) {
+  if (conversationPanelMode !== "realtime-qa") return;
+  if (!realtimeQaDraftActive && !isRealtimeConversationRunning()) return;
+
+  const formatted = formatRealtimeQaTranscriptForNote(transcript);
+  if (!realtimeQaDraftActive) {
+    renderRealtimeQaDraft(transcript);
+    return;
+  }
+
+  if (outputPanel) outputPanel.hidden = false;
+  mainLayout?.classList.toggle("layout--single", false);
+  $("result-area").hidden = false;
+  setNoteTitle("Vraag & Antwoord — live");
+  setNoteBodyPlainText(
+    formatted,
+    "Gesprek gestart — spreek je antwoord in. Zeg “stop” om uit te werken.",
+  );
+  const body = $("note-body");
+  body?.scrollTo?.({ top: body.scrollHeight, behavior: "smooth" });
+}
+
 async function processRealtimeConversationTranscript(transcript) {
   const cleanedTranscript = String(transcript || "").trim();
   if (!cleanedTranscript) {
@@ -464,6 +584,10 @@ async function processRealtimeConversationTranscript(transcript) {
   }
 
   await persistConversationTranscript(cleanedTranscript, { kind: "realtime-qa" });
+
+  realtimeQaDraftActive = false;
+  $("result-area")?.classList.remove("is-realtime-qa-draft");
+  setRealtimeQaDraftEditing(false);
 
   const processId = ++activeProcessId;
   const { requestId, signal } = beginRequest();
@@ -564,6 +688,7 @@ function cancelRealtimeQaConversation({ fromVoice = false } = {}) {
   stopRealtimeInterview(fromVoice ? "Annuleer — gesprek afgebroken" : "Geannuleerd");
   resetRecordModeUi();
   setConversationRecordingUi(false);
+  endRealtimeQaDraft({ restoreResult: true });
   updateProcessUi();
   if (fromVoice) {
     showFeedback("Gesprek geannuleerd.", "success");
@@ -585,14 +710,18 @@ function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
     stopRealtimeInterview("Stopcommando herkend — verwerken…");
     resetRecordModeUi();
     setConversationRecordingUi(false);
-    updateProcessUi();
     if (transcript.trim()) {
+      setNoteTitle("Vraag & Antwoord — uitwerken…");
+      setNoteBodyPlainText(formatRealtimeQaTranscriptForNote(transcript), "");
+      updateProcessUi();
       void processRealtimeConversationTranscript(transcript).finally(() => {
         realtimeAutoFinishing = false;
       });
       return;
     }
+    endRealtimeQaDraft({ restoreResult: true });
     realtimeAutoFinishing = false;
+    updateProcessUi();
     showFeedback(
       "Stopcommando gehoord, maar er is nog geen transcript. Start opnieuw met Vraag & Antwoord.",
       "error",
@@ -1482,14 +1611,21 @@ function buildReviewSpeechPlan() {
     }
   };
 
-  const title = $("note-title")?.value.trim();
+  const title = getNoteTitle();
   if (title) addText(`Titel: ${title}.`, "title");
 
-  const body = getNoteBodyMarkdown().replace(/\*\*/g, "");
-  const paragraphs = body
-    .split(/\n\s*\n/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+  const body = getNoteBodyForSpeech();
+  const titleNorm = title.toLowerCase().replace(/\s+/g, " ").trim();
+  const paragraphs = splitNoteBodyForSpeech(body).filter((para) => {
+    const paraNorm = para
+      .replace(/\*\*/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    return !titleNorm || paraNorm !== titleNorm;
+  });
+
   if (paragraphs.length) {
     paragraphs.forEach((para, i) => {
       const prefix = i === 0 ? "Notitie: " : "";
@@ -1528,8 +1664,11 @@ function buildReviewSpeechText() {
   return buildReviewSpeechPlan().chunks.join(" ");
 }
 
-/** @param {{ resumeIndex: number; paragraphKey: string | null }} suspend @param {string[]} keys @param {number} chunkCount */
-function resolveReviewResumeChunkIndex(suspend, keys, chunkCount) {
+/** @param {{ resumeIndex: number; paragraphKey: string | null }} suspend @param {string[]} keys @param {number} chunkCount @param {{ advanceIfEmpty?: boolean }} [opts] */
+function resolveReviewResumeChunkIndex(suspend, keys, chunkCount, opts = {}) {
+  if (opts.advanceIfEmpty) {
+    return Math.min(suspend.resumeIndex + 1, Math.max(0, chunkCount - 1));
+  }
   if (suspend.paragraphKey) {
     const paragraphStart = keys.indexOf(suspend.paragraphKey);
     if (paragraphStart >= 0) return paragraphStart;
@@ -1537,34 +1676,144 @@ function resolveReviewResumeChunkIndex(suspend, keys, chunkCount) {
   return Math.max(0, Math.min(suspend.resumeIndex, Math.max(0, chunkCount - 1)));
 }
 
+function normalizeReviewSpeechEchoText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** @param {string} text */
+function isLikelyReviewTtsEcho(text) {
+  const spoken = normalizeReviewSpeechEchoText(state.reviewPlayback.lastSpokenChunk);
+  const candidate = normalizeReviewSpeechEchoText(text);
+  if (!spoken || !candidate) return false;
+  if (spoken.includes(candidate) || candidate.includes(spoken)) return true;
+  const spokenWords = new Set(spoken.split(" ").filter((w) => w.length > 3));
+  const candidateWords = candidate.split(" ").filter((w) => w.length > 3);
+  if (!candidateWords.length) return false;
+  const overlap = candidateWords.filter((w) => spokenWords.has(w)).length;
+  return overlap / candidateWords.length >= 0.6;
+}
+
 /** @param {string} text */
 function splitSpeechChunks(text) {
-  const sentences = text.match(/[^.!?]+[.!?]+/g);
-  if (!sentences?.length) return text.trim() ? [text.trim()] : [];
+  const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const sentences = normalized.match(/[^.!?]+[.!?]+/g);
+  if (sentences?.length) {
+    /** @type {string[]} */
+    const chunks = [];
+    let buf = "";
+    const maxLen = (chunkIndex) => (chunkIndex === 0 ? 120 : 320);
+    let chunkIndex = 0;
+    for (const sentence of sentences) {
+      const limit = maxLen(chunkIndex);
+      if (buf && (buf + sentence).length > limit) {
+        chunks.push(buf.trim());
+        buf = sentence;
+        chunkIndex = chunks.length;
+      } else {
+        buf += sentence;
+      }
+    }
+    if (buf.trim()) chunks.push(buf.trim());
+    return chunks;
+  }
+
+  return splitSpeechChunksByLines(normalized);
+}
+
+/** @param {string} text */
+function splitSpeechChunksByLines(text) {
+  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return splitSpeechChunksByLength(text);
+  }
+
   /** @type {string[]} */
   const chunks = [];
   let buf = "";
   const maxLen = (chunkIndex) => (chunkIndex === 0 ? 120 : 320);
   let chunkIndex = 0;
-  for (const sentence of sentences) {
+  for (const line of lines) {
     const limit = maxLen(chunkIndex);
-    if (buf && (buf + sentence).length > limit) {
-      chunks.push(buf.trim());
-      buf = sentence;
+    const candidate = buf ? `${buf}\n${line}` : line;
+    if (buf && candidate.length > limit) {
+      chunks.push(buf);
+      buf = line;
       chunkIndex = chunks.length;
     } else {
-      buf += sentence;
+      buf = candidate;
     }
   }
   if (buf.trim()) chunks.push(buf.trim());
-  return chunks;
+  return chunks.length ? chunks : splitSpeechChunksByLength(text);
+}
+
+/** @param {string} text @param {number} [maxLen] */
+function splitSpeechChunksByLength(text, maxLen = 320) {
+  if (text.length <= maxLen) return [text];
+  /** @type {string[]} */
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxLen, text.length);
+    if (end < text.length) {
+      const space = text.lastIndexOf(" ", end);
+      if (space > start + 40) end = space;
+    }
+    chunks.push(text.slice(start, end).trim());
+    start = end;
+  }
+  return chunks.filter(Boolean);
+}
+
+/** @param {string} body */
+function splitNoteBodyForSpeech(body) {
+  const cleaned = body.replace(/\*\*/g, "").trim();
+  if (!cleaned) return [];
+
+  let blocks = cleaned
+    .split(/\n\s*\n/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  if (blocks.length <= 1 && cleaned.includes("\n")) {
+    /** @type {string[]} */
+    const lineBlocks = [];
+    const lines = cleaned.split(/\n/).map((line) => line.trim());
+    let current = "";
+    for (const line of lines) {
+      if (!line) continue;
+      const isHeader = /^[^\n:]{2,64}:$/.test(line);
+      if (isHeader && current) {
+        lineBlocks.push(current.trim());
+        current = line;
+      } else if (isHeader) {
+        current = line;
+      } else if (current) {
+        current += `\n${line}`;
+      } else {
+        current = line;
+      }
+    }
+    if (current.trim()) lineBlocks.push(current.trim());
+    if (lineBlocks.length > 1) blocks = lineBlocks;
+  }
+
+  return blocks.length ? blocks : [cleaned];
 }
 
 function prefetchReviewSpeech() {
   if (!hasUitgewerktResult()) return;
-  const chunks = splitSpeechChunks(buildReviewSpeechText());
-  if (chunks[0]) void prefetchOpenAiSpeech(chunks[0]);
-  if (chunks[1]) void prefetchOpenAiSpeech(chunks[1]);
+  const plan = buildReviewSpeechPlan();
+  if (plan.chunks[0]) void prefetchOpenAiSpeech(plan.chunks[0]);
+  if (plan.chunks[1]) void prefetchOpenAiSpeech(plan.chunks[1]);
 }
 
 function updateReviewStatus(message) {
@@ -1607,13 +1856,14 @@ function resetReviewInlineCorrectionState() {
   reviewInlineCorrection.finalizeInFlight = false;
 }
 
-function cancelPendingSpeechInterrupt() {
+function cancelPendingSpeechInterrupt({ resumePlayback = true } = {}) {
   if (reviewInlineCorrection.interruptConfirmTimer) {
     clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
     reviewInlineCorrection.interruptConfirmTimer = null;
   }
   reviewInlineCorrection.pendingInterrupt = false;
   if (reviewInlineCorrection.active) return;
+  if (!resumePlayback || !state.reviewPlayback.active) return;
 
   if (state.reviewPlayback.suspendForCorrection) {
     state.reviewPlayback.suspendForCorrection = null;
@@ -1624,6 +1874,11 @@ function cancelPendingSpeechInterrupt() {
     }
     updateReviewUi();
     updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+    return;
+  }
+
+  if (state.reviewPlayback.paused) {
+    resumeReviewPlayback();
   }
 }
 
@@ -1640,26 +1895,37 @@ function beginInlineCorrection() {
 }
 
 function updateVoiceCorrectUi() {
+  const correcting = reviewInlineCorrection.active;
   const rec =
-    reviewInlineCorrection.active ||
+    correcting ||
     (isSupplementVoiceListening() && !isReviewInlineListening());
   btnVoiceCorrect?.classList.toggle("is-recording", rec);
   btnVoiceCorrect?.setAttribute("aria-pressed", rec ? "true" : "false");
   let label = "Mondeling corrigeren";
-  if (rec) {
+  if (rec && !correcting) {
     label = "Stoppen & verwerken";
-  } else if (state.reviewPlayback.active && isReviewInlineListening()) {
-    label = 'Zeg "Correctie" of spreek om te corrigeren';
+  } else if (correcting) {
+    label = "Stoppen & verder voorlezen";
+  } else if (
+    REVIEW_INLINE_LISTEN_ENABLED &&
+    state.reviewPlayback.active &&
+    isReviewInlineListening()
+  ) {
+    label = 'Spreek "Correctie" of je aanpassing in';
   }
   btnVoiceCorrect?.setAttribute("aria-label", label);
   btnVoiceCorrect?.setAttribute("title", label);
   const processingBusy = outputPanel?.classList.contains("is-busy");
-  btnVoiceCorrect?.toggleAttribute("disabled", Boolean(processingBusy));
+  const playbackOnly =
+    state.reviewPlayback.active &&
+    !REVIEW_INLINE_LISTEN_ENABLED &&
+    !correcting;
+  btnVoiceCorrect?.toggleAttribute("disabled", Boolean(processingBusy) || playbackOnly);
 }
 
 /** @param {VisitReportResult} result */
 function applyReportFieldsFromResult(result) {
-  $("note-title").value = result.megaMinnie.salesforceNote.title;
+  setNoteTitle(result.megaMinnie.salesforceNote.title);
   setNoteBodyMarkdown(result.megaMinnie.salesforceNote.body);
   renderTasksAndEvents(result, state.defaultAccountManager);
   state.lastResult = result;
@@ -1667,7 +1933,11 @@ function applyReportFieldsFromResult(result) {
 
 async function applyInlineCorrectionToReport(supplementText) {
   const existing = getExistingMegaMinnieFromUi();
-  if (!existing || !supplementText.trim()) return null;
+  if (!existing) {
+    showFeedback("Notitietitel en -tekst mogen niet leeg zijn.", "error");
+    return null;
+  }
+  if (!supplementText.trim()) return null;
 
   const fd = formFields();
   fd.append("existing", JSON.stringify(existing));
@@ -1680,6 +1950,67 @@ async function applyInlineCorrectionToReport(supplementText) {
   return result;
 }
 
+function waitForInlineCorrectionApply() {
+  if (!reviewInlineCorrection.applyInFlight) return Promise.resolve();
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (!reviewInlineCorrection.applyInFlight) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, 40);
+    };
+    tick();
+  });
+}
+
+function beginReviewPlaybackSession() {
+  reviewPlaybackSessionId += 1;
+  return reviewPlaybackSessionId;
+}
+
+function invalidateReviewPlaybackSession() {
+  reviewPlaybackSessionId += 1;
+}
+
+function isCurrentReviewPlaybackSession(sessionId) {
+  return sessionId === reviewPlaybackSessionId;
+}
+
+/** @param {number} sessionId @param {{ skipInlineListenStop?: boolean }} [opts] */
+function finishReviewPlaybackSession(sessionId, opts = {}) {
+  if (!isCurrentReviewPlaybackSession(sessionId)) return;
+  if (!opts.skipInlineListenStop) {
+    stopReviewInlineListen();
+  }
+  if (!reviewInlineCorrection.active && !state.reviewPlayback.suspendForCorrection) {
+    supplementRealtimeController?.stop("");
+  }
+  state.reviewPlayback.active = false;
+  state.reviewPlayback.paused = false;
+  state.reviewPlayback.suppressLoopCleanup = false;
+  updateReviewUi();
+}
+
+function clearInlineCorrectionTranscript() {
+  reviewInlineCorrection.segments = [];
+  reviewInlineCorrection.flushedSegmentCount = 0;
+}
+
+/** @returns {Promise<boolean>} */
+async function flushAllInlineCorrectionSegments() {
+  if (reviewInlineCorrection.debounceTimer) {
+    clearTimeout(reviewInlineCorrection.debounceTimer);
+    reviewInlineCorrection.debounceTimer = null;
+  }
+  await waitForInlineCorrectionApply();
+  while (reviewInlineCorrection.flushedSegmentCount < reviewInlineCorrection.segments.length) {
+    const ok = await flushInlineCorrection({ final: true });
+    if (!ok) return false;
+  }
+  return true;
+}
+
 function scheduleInlineCorrectionApply() {
   if (reviewInlineCorrection.debounceTimer) {
     clearTimeout(reviewInlineCorrection.debounceTimer);
@@ -1690,48 +2021,44 @@ function scheduleInlineCorrectionApply() {
   }, 450);
 }
 
+/** @returns {Promise<boolean>} */
 async function flushInlineCorrection({ final = false } = {}) {
   if (reviewInlineCorrection.applyInFlight) {
-    if (final) {
-      reviewInlineCorrection.finalizeInFlight = true;
-    }
-    return;
+    if (!final) return false;
+    await waitForInlineCorrectionApply();
   }
 
   const newParts = reviewInlineCorrection.segments.slice(
     reviewInlineCorrection.flushedSegmentCount,
   );
   const supplementText = newParts.join(" ").trim();
-  if (!supplementText) {
-    if (final && reviewInlineCorrection.finalizeInFlight) {
-      reviewInlineCorrection.finalizeInFlight = false;
-    }
-    return;
-  }
+  if (!supplementText) return true;
 
   reviewInlineCorrection.applyInFlight = true;
   updateReviewStatus("Tekst bijwerken…");
   try {
-    await applyInlineCorrectionToReport(supplementText);
+    const result = await applyInlineCorrectionToReport(supplementText);
+    if (!result) return false;
     reviewInlineCorrection.flushedSegmentCount = reviewInlineCorrection.segments.length;
     updateReviewStatus(
-      reviewInlineCorrection.active ? "Spreek verder of wacht…" : "",
+      reviewInlineCorrection.active
+        ? 'Tekst bijgewerkt — spreek verder of zeg "Voorlezen"'
+        : "",
     );
+    return true;
   } catch (err) {
     showFeedback(
       err instanceof Error ? err.message : "Live correctie mislukt",
       "error",
     );
+    return false;
   } finally {
     reviewInlineCorrection.applyInFlight = false;
-    if (reviewInlineCorrection.finalizeInFlight) {
-      reviewInlineCorrection.finalizeInFlight = false;
-      await flushInlineCorrection({ final: true });
-    }
   }
 }
 
-function handleReviewCorrectieCommand() {
+function handleReviewCorrectieCommand(opts = {}) {
+  if (!REVIEW_INLINE_LISTEN_ENABLED) return;
   if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
   if (reviewInlineCorrection.active) return;
 
@@ -1751,7 +2078,7 @@ function handleReviewCorrectieCommand() {
     pauseReviewPlayback();
   }
 
-  reviewInlineCorrection.enteredViaCommand = true;
+  reviewInlineCorrection.enteredViaCommand = opts.viaCommand !== false;
   beginInlineCorrection();
 }
 
@@ -1767,13 +2094,37 @@ function appendInlineCorrectionSegment(text) {
 function maybeHandleReviewVoiceCommand(text) {
   if (!state.reviewPlayback.active) return false;
   const cmd = detectReviewVoiceCommand(text);
+  if (!cmd) return false;
+
+  if (state.reviewPlayback.ttsActive) {
+    const remainder = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
+    if (cmd !== "correctie" && cmd !== "voorlezen" && remainder && isLikelyReviewTtsEcho(remainder)) {
+      return false;
+    }
+    if (cmd === "voorlezen" && isLikelyReviewTtsEcho(text)) return false;
+  } else if (isLikelyReviewTtsEcho(text)) {
+    return false;
+  }
+
   if (cmd === "correctie") {
     handleReviewCorrectieCommand();
-    appendInlineCorrectionSegment(text);
+    const remainder = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
+    if (remainder) appendInlineCorrectionSegment(remainder);
     return true;
   }
   if (cmd === "voorlezen") {
     void handleReviewVoorlezenCommand();
+    return true;
+  }
+  return false;
+}
+
+/** @param {{ pendingUserText?: string; transcript?: string }} [ctx] */
+function tryHandleReviewVoiceCommandFromContext(ctx = {}) {
+  const pending = String(ctx.pendingUserText || "").trim();
+  if (pending && maybeHandleReviewVoiceCommand(pending)) return true;
+  const fromTranscript = extractLastRealtimeUserText(ctx.transcript || "");
+  if (fromTranscript && fromTranscript !== pending && maybeHandleReviewVoiceCommand(fromTranscript)) {
     return true;
   }
   return false;
@@ -1787,66 +2138,59 @@ async function handleReviewVoorlezenCommand() {
     reviewInlineCorrection.resumeTimer = null;
   }
 
-  if (reviewInlineCorrection.active || reviewInlineCorrection.pendingInterrupt) {
-    if (reviewInlineCorrection.pendingInterrupt) {
-      cancelPendingSpeechInterrupt();
-    }
+  if (reviewInlineCorrection.active) {
     await finalizeInlineCorrectionAndResume();
     return;
   }
 
-  if (state.reviewPlayback.paused || state.reviewPlayback.suspendForCorrection) {
+  if (state.reviewPlayback.suspendForCorrection) {
     resumeReviewPlaybackInPlace();
+    return;
+  }
+
+  if (state.reviewPlayback.paused) {
+    resumeReviewPlayback();
   }
 }
 
 function handleReviewInlineSpeechStarted() {
-  if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
-  if (state.reviewPlayback.ttsActive && !reviewInlineCorrection.active) return;
-
+  if (!REVIEW_INLINE_LISTEN_ENABLED || !state.reviewPlayback.active) return;
   if (reviewInlineCorrection.resumeTimer) {
     clearTimeout(reviewInlineCorrection.resumeTimer);
     reviewInlineCorrection.resumeTimer = null;
   }
-
-  if (reviewInlineCorrection.active) return;
+  if (
+    reviewInlineCorrection.active ||
+    reviewInlineCorrection.finalizeInFlight
+  ) {
+    return;
+  }
   if (reviewInlineCorrection.pendingInterrupt) return;
 
-  reviewInlineCorrection.pendingInterrupt = true;
-  if (!state.reviewPlayback.suspendForCorrection) {
-    captureReviewPlaybackForCorrection();
+  if (
+    !state.reviewPlayback.paused &&
+    !state.reviewPlayback.suspendForCorrection &&
+    (state.reviewPlayback.ttsActive || reviewSpeechPlayer?.isActive?.())
+  ) {
+    pauseReviewPlayback();
   }
 
+  reviewInlineCorrection.pendingInterrupt = true;
+  if (reviewInlineCorrection.interruptConfirmTimer) {
+    clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
+  }
   reviewInlineCorrection.interruptConfirmTimer = setTimeout(() => {
     reviewInlineCorrection.interruptConfirmTimer = null;
     reviewInlineCorrection.pendingInterrupt = false;
-    reviewInlineCorrection.enteredViaCommand = false;
-    beginInlineCorrection();
+    if (!state.reviewPlayback.active || reviewInlineCorrection.active) return;
+    handleReviewCorrectieCommand({ viaCommand: false });
   }, INLINE_INTERRUPT_CONFIRM_MS);
 }
 
 /** @param {string} text */
 function handleReviewInlineUserTurn(text) {
   if (maybeHandleReviewVoiceCommand(text)) return;
-
-  if (!reviewInlineCorrection.active) {
-    const cleaned = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
-    if (
-      cleaned &&
-      reviewInlineCorrection.pendingInterrupt &&
-      !state.reviewPlayback.ttsActive
-    ) {
-      if (reviewInlineCorrection.interruptConfirmTimer) {
-        clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
-        reviewInlineCorrection.interruptConfirmTimer = null;
-      }
-      reviewInlineCorrection.pendingInterrupt = false;
-      beginInlineCorrection();
-      appendInlineCorrectionSegment(text);
-    }
-    return;
-  }
-
+  if (!reviewInlineCorrection.active) return;
   appendInlineCorrectionSegment(text);
 }
 
@@ -1868,33 +2212,24 @@ function scheduleInlineCorrectionResume() {
   }, delay);
 }
 
-/** @param {{ pendingUserText?: string }} [ctx] */
+/** @param {{ pendingUserText?: string; transcript?: string }} [ctx] */
 function handleReviewInlineSpeechStopped(ctx = {}) {
-  const pendingText = (ctx.pendingUserText || "").replace(/\s+/g, " ").trim();
+  const handledCommand = tryHandleReviewVoiceCommandFromContext(ctx);
 
   if (reviewInlineCorrection.pendingInterrupt && !reviewInlineCorrection.active) {
-    if (
-      isReviewCorrectieCommand(pendingText) ||
-      startsWithReviewCorrectieCommand(pendingText)
-    ) {
-      handleReviewCorrectieCommand();
-      appendInlineCorrectionSegment(pendingText);
-      return;
-    }
-    cancelPendingSpeechInterrupt();
-    return;
+    cancelPendingSpeechInterrupt({ resumePlayback: !handledCommand });
   }
+
+  if (handledCommand) return;
 
   if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
   if (reviewInlineCorrection.debounceTimer) {
     clearTimeout(reviewInlineCorrection.debounceTimer);
     reviewInlineCorrection.debounceTimer = null;
   }
+  const pending = String(ctx.pendingUserText || "").trim();
+  if (pending) appendInlineCorrectionSegment(pending);
   void flushInlineCorrection({ final: false });
-  if (reviewInlineCorrection.segments.length === 0 && !reviewInlineCorrection.enteredViaCommand) {
-    void finalizeInlineCorrectionAndResume();
-    return;
-  }
   updateReviewStatus(
     reviewInlineCorrection.segments.length === 0
       ? "Corrigeren — spreek je aanpassing in…"
@@ -1906,33 +2241,39 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
 async function finalizeInlineCorrectionAndResume() {
   if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
   reviewInlineCorrection.finalizeInFlight = true;
+  const hadSegments = reviewInlineCorrection.segments.length > 0;
+  const enteredViaCommand = reviewInlineCorrection.enteredViaCommand;
+  const advanceIfEmpty = !hadSegments && !enteredViaCommand;
   if (reviewInlineCorrection.resumeTimer) {
     clearTimeout(reviewInlineCorrection.resumeTimer);
     reviewInlineCorrection.resumeTimer = null;
   }
-  if (reviewInlineCorrection.debounceTimer) {
-    clearTimeout(reviewInlineCorrection.debounceTimer);
-    reviewInlineCorrection.debounceTimer = null;
-  }
-  await flushInlineCorrection({ final: true });
 
-  if (!state.reviewPlayback.suspendForCorrection) {
-    reviewInlineCorrection.active = false;
+  const flushOk = await flushAllInlineCorrectionSegments();
+  if (hadSegments && !flushOk) {
     reviewInlineCorrection.finalizeInFlight = false;
+    updateReviewStatus("Correctie mislukt — spreek opnieuw of zeg \"Voorlezen\"");
     updateVoiceCorrectUi();
     return;
   }
 
+  clearInlineCorrectionTranscript();
   reviewInlineCorrection.active = false;
   reviewInlineCorrection.pendingInterrupt = false;
   reviewInlineCorrection.enteredViaCommand = false;
   updateVoiceCorrectUi();
 
-  const resumed = resumeReviewPlaybackInPlace();
+  if (!state.reviewPlayback.suspendForCorrection) {
+    reviewInlineCorrection.finalizeInFlight = false;
+    return;
+  }
+
+  const resumed = resumeReviewPlaybackInPlace({ advanceIfEmpty });
   if (!resumed) {
+    invalidateReviewPlaybackSession();
     state.reviewPlayback.suppressLoopCleanup = true;
     abortReviewPlaybackLoop();
-    await resumeReviewPlaybackAfterCorrection();
+    await resumeReviewPlaybackAfterCorrection({ advanceIfEmpty });
   }
   void ensureReviewInlineListen();
   reviewInlineCorrection.finalizeInFlight = false;
@@ -1941,7 +2282,8 @@ async function finalizeInlineCorrectionAndResume() {
   }
 }
 
-function resumeReviewPlaybackInPlace() {
+/** @param {{ advanceIfEmpty?: boolean }} [opts] */
+function resumeReviewPlaybackInPlace(opts = {}) {
   const suspend = state.reviewPlayback.suspendForCorrection;
   if (!suspend) return false;
 
@@ -1952,6 +2294,7 @@ function resumeReviewPlaybackInPlace() {
     suspend,
     plan.chunkParagraphKeys,
     plan.chunks.length,
+    opts,
   );
   void prefetchOpenAiSpeech(plan.chunks[newIndex]);
   if (plan.chunks[newIndex + 1]) void prefetchOpenAiSpeech(plan.chunks[newIndex + 1]);
@@ -1962,6 +2305,7 @@ function resumeReviewPlaybackInPlace() {
   state.reviewPlayback.index = newIndex;
   state.reviewPlayback.paused = false;
   state.reviewPlayback.cancelled = false;
+  state.reviewPlayback.lastSpokenChunk = plan.chunks[newIndex] ?? "";
 
   const player = ensureReviewSpeechPlayer();
   if (!player.isActive()) return false;
@@ -1973,7 +2317,9 @@ function resumeReviewPlaybackInPlace() {
 }
 
 async function startReviewInlineListen() {
-  if (!realtimeInterviewEnabled || !reviewInlineListenController) return;
+  if (!REVIEW_INLINE_LISTEN_ENABLED || !realtimeInterviewEnabled || !reviewInlineListenController) {
+    return;
+  }
   if (isReviewInlineListening()) return;
   await reviewInlineListenController.start({
     listenOnly: true,
@@ -1983,6 +2329,7 @@ async function startReviewInlineListen() {
 }
 
 async function ensureReviewInlineListen() {
+  if (!REVIEW_INLINE_LISTEN_ENABLED) return;
   if (!state.reviewPlayback.active || !realtimeInterviewEnabled) return;
   if (isReviewInlineListening()) return;
   try {
@@ -1992,8 +2339,90 @@ async function ensureReviewInlineListen() {
   }
 }
 
+function stopReviewRealtimeSessions() {
+  reviewInlineListenController?.stop("");
+  supplementRealtimeController?.stop("");
+}
+
+async function prepareForRealtimeQaStart() {
+  if (realtimeFinishCheckTimer) {
+    clearTimeout(realtimeFinishCheckTimer);
+    realtimeFinishCheckTimer = null;
+  }
+  realtimeAutoFinishing = false;
+  stopReviewPlayback();
+  stopReviewRealtimeSessions();
+  if (realtimeController?.isConnecting()) {
+    realtimeController.stop("");
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+async function startRealtimeQaConversation() {
+  if (!realtimeInterviewEnabled) {
+    if (state.interview.active) {
+      cancelInterview();
+      return;
+    }
+    if (isConversationActive()) cancelConversationRecording();
+    if (isRealtimeConversationRunning()) stopRealtimeInterview();
+    resetRecordModeUi();
+    void startInterview();
+    return;
+  }
+
+  conversationPanelMode = "realtime-qa";
+  if (state.interview.active) cancelInterview();
+  if (isConversationActive()) cancelConversationRecording();
+
+  if (realtimeController?.isConnecting()) {
+    setConversationStatus("Vraag & Antwoord verbinden…");
+    return;
+  }
+
+  if (isRealtimeConversationRunning()) {
+    setConversationStatus(
+      'Zeg "stop" om uit te werken, of "annuleer" om te stoppen zonder verwerking.',
+    );
+    return;
+  }
+
+  await prepareForRealtimeQaStart();
+  showInterviewPanel(false);
+  void prefetchOpenAiSpeech(REALTIME_QA_OPENING_TEXT);
+  lastRealtimeTranscript = "";
+  beginRealtimeQaDraft();
+  setConversationStatus(`MegaMinnie: ${REALTIME_QA_OPENING_TEXT}…`);
+  const openingPromise = playOpenAiSpeechOnce(REALTIME_QA_OPENING_TEXT);
+  try {
+    const started = await realtimeController?.start({ skipOpeningGreeting: true });
+    if (!started || !isRealtimeConversationRunning()) return;
+
+    realtimeController.setMicEnabled(false);
+    realtimeController.seedAssistantTurn(REALTIME_QA_OPENING_TEXT);
+    lastRealtimeTranscript = realtimeController.getTranscript();
+    updateRealtimeQaDraft(lastRealtimeTranscript);
+
+    try {
+      await openingPromise;
+    } catch {
+      showFeedback("Kon begroeting niet afspelen. Controleer geluid en probeer opnieuw.", "error");
+    } finally {
+      if (isRealtimeConversationRunning()) {
+        realtimeController.setMicEnabled(true);
+        setConversationStatus(
+          'Luistert… Antwoord hardop. Zeg "stop" om uit te werken of "annuleer" om te stoppen.',
+        );
+      }
+    }
+  } catch {
+    /* onError in controller */
+  }
+  updateProcessUi();
+}
+
 function stopReviewInlineListen() {
-  reviewInlineListenController?.stop();
+  reviewInlineListenController?.stop("");
   if (!state.reviewPlayback.active) {
     resetReviewInlineCorrectionState();
   }
@@ -2015,7 +2444,7 @@ function abortReviewPlaybackLoop() {
   reviewSpeechPlayer?.stop();
 }
 
-async function resumeReviewPlaybackAfterCorrection() {
+async function resumeReviewPlaybackAfterCorrection(opts = {}) {
   const suspend = state.reviewPlayback.suspendForCorrection;
   state.reviewPlayback.suspendForCorrection = null;
   if (!suspend) return;
@@ -2030,9 +2459,12 @@ async function resumeReviewPlaybackAfterCorrection() {
     suspend,
     plan.chunkParagraphKeys,
     plan.chunks.length,
+    opts,
   );
   void prefetchOpenAiSpeech(plan.chunks[startIndex]);
   if (plan.chunks[startIndex + 1]) void prefetchOpenAiSpeech(plan.chunks[startIndex + 1]);
+
+  const sessionId = beginReviewPlaybackSession();
 
   state.reviewPlayback = {
     active: true,
@@ -2043,29 +2475,39 @@ async function resumeReviewPlaybackAfterCorrection() {
     index: startIndex,
     suspendForCorrection: null,
     suppressLoopCleanup: false,
+    ttsActive: false,
+    lastSpokenChunk: plan.chunks[startIndex] ?? "",
   };
   updateReviewUi();
   updateReviewStatus(REVIEW_PLAYBACK_STATUS);
 
-  if (realtimeInterviewEnabled && !isReviewInlineListening()) {
-    void startReviewInlineListen();
+  stopReviewRealtimeSessions();
+
+  if (REVIEW_INLINE_LISTEN_ENABLED && realtimeInterviewEnabled) {
+    try {
+      await startReviewInlineListen();
+    } catch {
+      showFeedback("Spraakherkenning voor correctie kon niet starten.", "error");
+    }
   }
 
   try {
     await ensureReviewSpeechPlayer().playFrom(plan.chunks, startIndex, {
       onProgress: (index) => {
         state.reviewPlayback.index = index;
+        state.reviewPlayback.lastSpokenChunk = plan.chunks[index] ?? "";
       },
     });
   } catch {
-    /* onError in player */
-  } finally {
-    if (!state.reviewPlayback.suspendForCorrection) {
-      stopReviewInlineListen();
+    if (isCurrentReviewPlaybackSession(sessionId) && !reviewSpeechPlayer?.isActive?.()) {
+      updateReviewStatus("Voorlezen gestopt.");
     }
-    state.reviewPlayback.active = false;
-    state.reviewPlayback.paused = false;
-    updateReviewUi();
+  } finally {
+    if (!isCurrentReviewPlaybackSession(sessionId)) {
+      state.reviewPlayback.suppressLoopCleanup = false;
+      return;
+    }
+    finishReviewPlaybackSession(sessionId);
   }
 }
 
@@ -2078,11 +2520,14 @@ function updateReviewUi() {
   const pb = state.reviewPlayback;
   const speaking = pb.active && !pb.paused;
   const paused = pb.active && pb.paused;
+  const correcting =
+    REVIEW_INLINE_LISTEN_ENABLED &&
+    (reviewInlineCorrection.active || Boolean(pb.suspendForCorrection));
 
   reviewSection?.classList.toggle("is-speaking", speaking);
   btnReviewRead?.toggleAttribute("disabled", pb.active);
-  if (btnReviewPause) btnReviewPause.hidden = !speaking;
-  if (btnReviewResume) btnReviewResume.hidden = !paused;
+  if (btnReviewPause) btnReviewPause.hidden = !speaking || correcting;
+  if (btnReviewResume) btnReviewResume.hidden = !paused || correcting;
   if (btnReviewStop) btnReviewStop.hidden = !pb.active;
   updateVoiceCorrectUi();
 }
@@ -2099,13 +2544,17 @@ function ensureReviewSpeechPlayer() {
 }
 
 function stopReviewPlayback() {
+  invalidateReviewPlaybackSession();
   state.reviewPlayback.suspendForCorrection = null;
   state.reviewPlayback.cancelled = true;
   state.reviewPlayback.active = false;
   state.reviewPlayback.paused = false;
   reviewSpeechPlayer?.stop();
-  stopReviewInlineListen();
-  supplementRealtimeController?.stop();
+  stopReviewRealtimeSessions();
+  if (isRealtimeConversationRunning()) {
+    stopRealtimeInterview("");
+  }
+  resetReviewInlineCorrectionState();
   window.speechSynthesis?.cancel();
   updateReviewUi();
   if (reviewStatus) reviewStatus.hidden = true;
@@ -2122,6 +2571,8 @@ async function runReviewPlayback(startIndex = 0) {
   void prefetchOpenAiSpeech(plan.chunks[safeStart]);
   if (plan.chunks[safeStart + 1]) void prefetchOpenAiSpeech(plan.chunks[safeStart + 1]);
 
+  const sessionId = beginReviewPlaybackSession();
+
   state.reviewPlayback = {
     active: true,
     paused: false,
@@ -2131,34 +2582,46 @@ async function runReviewPlayback(startIndex = 0) {
     index: safeStart,
     suspendForCorrection: null,
     suppressLoopCleanup: false,
+    ttsActive: false,
+    lastSpokenChunk: plan.chunks[safeStart] ?? "",
   };
   updateReviewUi();
-  updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+  updateReviewStatus("");
 
-  if (realtimeInterviewEnabled) {
-    void startReviewInlineListen();
+  stopReviewRealtimeSessions();
+
+  if (REVIEW_INLINE_LISTEN_ENABLED && realtimeInterviewEnabled) {
+    try {
+      await startReviewInlineListen();
+    } catch {
+      showFeedback("Spraakherkenning voor correctie kon niet starten.", "error");
+    }
   }
 
   try {
     await ensureReviewSpeechPlayer().playFrom(plan.chunks, safeStart, {
       onProgress: (index) => {
         state.reviewPlayback.index = index;
+        state.reviewPlayback.lastSpokenChunk = plan.chunks[index] ?? "";
       },
     });
   } catch {
-    /* onError in player */
-  } finally {
-    if (!state.reviewPlayback.suppressLoopCleanup) {
-      stopReviewInlineListen();
+    if (isCurrentReviewPlaybackSession(sessionId) && !reviewSpeechPlayer?.isActive?.()) {
+      updateReviewStatus("Voorlezen gestopt.");
     }
-    state.reviewPlayback.suppressLoopCleanup = false;
-    state.reviewPlayback.active = false;
-    state.reviewPlayback.paused = false;
-    updateReviewUi();
+  } finally {
+    if (!isCurrentReviewPlaybackSession(sessionId)) {
+      state.reviewPlayback.suppressLoopCleanup = false;
+      return;
+    }
+    finishReviewPlaybackSession(sessionId);
   }
 }
 
 async function startReviewPlayback() {
+  if (isRealtimeConversationRunning()) {
+    stopRealtimeInterview("");
+  }
   stopReviewPlayback();
   await runReviewPlayback(0);
 }
@@ -3281,16 +3744,17 @@ function clearAllInputSources() {
 }
 
 function hasUitgewerktResult() {
+  if (realtimeQaDraftActive) return false;
   if (!state.lastResult) return false;
   const note = state.lastResult.megaMinnie?.salesforceNote;
   return Boolean(note?.title?.trim() || note?.body?.trim());
 }
 
 function updateOutputVisibility() {
-  const show = hasUitgewerktResult();
+  const show = hasUitgewerktResult() || realtimeQaDraftActive;
   if (outputPanel) outputPanel.hidden = !show;
   mainLayout?.classList.toggle("layout--single", !show);
-  setTasksEventsToolbarVisible(show);
+  setTasksEventsToolbarVisible(hasUitgewerktResult());
   if (!show) {
     $("result-area").hidden = true;
     if (reviewSection) reviewSection.hidden = true;
@@ -3369,7 +3833,7 @@ function showSupplementAudioPreview(blob) {
 function getExistingMegaMinnieFromUi() {
   const base = state.lastResult?.megaMinnie;
   if (!base) return null;
-  const title = $("note-title")?.value.trim() ?? "";
+  const title = getNoteTitle();
   const body = getNoteBodyMarkdown();
   if (!title || !body) return null;
   return collectTasksEventsFromUi({
@@ -3431,7 +3895,10 @@ async function startSupplementVoiceCorrection() {
   }
 
   if (state.reviewPlayback.active && isReviewInlineListening()) {
-    showFeedback("Spreek je correctie in — MegaMinnie luistert mee.", "info");
+    handleReviewCorrectieCommand();
+    return;
+  }
+  if (state.reviewPlayback.active && !REVIEW_INLINE_LISTEN_ENABLED) {
     return;
   }
 
@@ -3471,6 +3938,7 @@ async function finishSupplementVoiceCorrection() {
     if (resumeAfter) {
       state.reviewPlayback.cancelled = false;
       if (!resumeReviewPlaybackInPlace()) {
+        invalidateReviewPlaybackSession();
         state.reviewPlayback.suppressLoopCleanup = true;
         abortReviewPlaybackLoop();
         await resumeReviewPlaybackAfterCorrection();
@@ -3483,11 +3951,7 @@ async function finishSupplementVoiceCorrection() {
 }
 
 function clearResultFields() {
-  const title = $("note-title");
-  if (title) {
-    title.value = "";
-    title.placeholder = "";
-  }
+  clearNoteTitle();
   clearNoteBody();
 }
 
@@ -3582,7 +4046,6 @@ function setInputBusy(busy, message, opts = {}) {
     updateInputChrome();
     btnProcess.disabled = true;
     if (lockActions) {
-      btnPickFiles?.setAttribute("disabled", "");
       btnInvoer?.setAttribute("disabled", "");
       btnConversation?.setAttribute("disabled", "");
       btnManual?.setAttribute("disabled", "");
@@ -3593,7 +4056,6 @@ function setInputBusy(busy, message, opts = {}) {
   } else {
     inputBusy.hidden = true;
     inputPanel?.classList.remove("is-input-busy");
-    btnPickFiles?.removeAttribute("disabled");
     btnInvoer?.removeAttribute("disabled");
     btnConversation?.removeAttribute("disabled");
     btnManual?.removeAttribute("disabled");
@@ -3928,7 +4390,7 @@ async function loadHealth() {
 fileDropzone?.addEventListener("click", (e) => {
   if (
     e.target.closest(
-      "#btn-invoer, #btn-conversation, #btn-pick-files, #btn-manual, #btn-cancel-drop, .input-hub__drop-busy, .test-recordings, button, a",
+      "#btn-invoer, #btn-conversation, #btn-manual, #btn-cancel-drop, .input-hub__drop-busy, .test-recordings, button, a",
     )
   ) {
     return;
@@ -3960,12 +4422,6 @@ fileInput?.addEventListener("change", () => {
   fileInput.value = "";
 });
 
-btnPickFiles?.addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  fileInput?.click();
-});
-
 btnManual?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
@@ -3994,36 +4450,7 @@ btnTestMode?.addEventListener("click", (e) => {
 btnInvoer?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
-  if (!realtimeInterviewEnabled) {
-    if (state.interview.active) {
-      cancelInterview();
-      return;
-    }
-    if (isConversationActive()) cancelConversationRecording();
-    if (isRealtimeConversationRunning()) stopRealtimeInterview();
-    resetRecordModeUi();
-    void startInterview();
-    return;
-  }
-  conversationPanelMode = "realtime-qa";
-  if (state.interview.active) cancelInterview();
-  if (isConversationActive()) cancelConversationRecording();
-  if (realtimeController?.isConnecting()) {
-    cancelRealtimeQaConversation();
-    return;
-  }
-  if (isRealtimeConversationRunning()) {
-    setConversationStatus(
-      'Zeg "stop" om uit te werken, of "annuleer" om te stoppen zonder verwerking.',
-    );
-    return;
-  }
-  showInterviewPanel(false);
-  realtimeAutoFinishing = false;
-  lastRealtimeTranscript = "";
-  supplementRealtimeController?.stop();
-  void realtimeController?.start();
-  updateProcessUi();
+  void startRealtimeQaConversation();
 });
 
 btnConversation?.addEventListener("click", (e) => {
@@ -4106,7 +4533,10 @@ btnVoiceCorrect?.addEventListener("click", (e) => {
     return;
   }
   if (state.reviewPlayback.active && isReviewInlineListening()) {
-    showFeedback("Spreek je correctie in — MegaMinnie luistert mee.", "info");
+    handleReviewCorrectieCommand();
+    return;
+  }
+  if (state.reviewPlayback.active && !REVIEW_INLINE_LISTEN_ENABLED) {
     return;
   }
   void startSupplementVoiceCorrection();
@@ -4856,6 +5286,7 @@ async function processSupplement(opts = {}) {
     const resumeReviewAfter =
       opts.resumeReviewAfter === true && Boolean(state.reviewPlayback.suspendForCorrection);
     if (resumeReviewAfter) {
+      invalidateReviewPlaybackSession();
       state.reviewPlayback.suppressLoopCleanup = true;
       abortReviewPlaybackLoop();
     } else {
@@ -4911,12 +5342,6 @@ async function processSupplement(opts = {}) {
       showProcessingError(
         err instanceof Error ? err.message : "Bijwerken mislukt",
       );
-      if (resumeReviewAfter) {
-        state.reviewPlayback.cancelled = false;
-        if (!resumeReviewPlaybackInPlace()) {
-          await resumeReviewPlaybackAfterCorrection();
-        }
-      }
     } finally {
       if (isRequestActive(requestId)) {
         activeAbort = null;
@@ -5078,7 +5503,7 @@ function getLoadingMessage(mode) {
 }
 
 function cancelResultProcessing() {
-  $("note-title").placeholder = "";
+  clearNoteTitle();
   clearNoteBody();
   updateOutputVisibility();
 }
@@ -5455,11 +5880,52 @@ function noteBodyInnerHtmlToMarkdown(html) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function getNoteTitle() {
+  const el = $("note-title");
+  if (!el) return "";
+  if ("value" in el && typeof el.value === "string") return el.value.trim();
+  return (el.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** @param {string} text */
+function setNoteTitle(text) {
+  const el = $("note-title");
+  if (!el) return;
+  if ("value" in el && typeof el.value === "string") {
+    el.value = text;
+  } else {
+    el.textContent = text;
+  }
+}
+
+function clearNoteTitle() {
+  const el = $("note-title");
+  if (!el) return;
+  if ("value" in el && typeof el.value === "string") {
+    el.value = "";
+    el.placeholder = "";
+  } else {
+    el.textContent = "";
+  }
+}
+
 function getNoteBodyMarkdown() {
   const el = $("note-body");
   if (!el) return "";
   if ("value" in el && typeof el.value === "string") return el.value.trim();
   return noteBodyInnerHtmlToMarkdown(el.innerHTML);
+}
+
+function getNoteBodyForSpeech() {
+  const el = $("note-body");
+  const fallback = state.lastResult?.megaMinnie?.salesforceNote?.body?.trim() ?? "";
+  if (!el) return fallback;
+  if ("value" in el && typeof el.value === "string") {
+    return el.value.trim() || fallback;
+  }
+  const fromInnerText = (el.innerText ?? el.textContent ?? "").trim();
+  if (fromInnerText) return fromInnerText;
+  return noteBodyInnerHtmlToMarkdown(el.innerHTML).trim() || fallback;
 }
 
 /** @param {string} text */
@@ -5496,15 +5962,16 @@ function resizeNoteBody() {
 }
 
 $("note-body")?.addEventListener("input", resizeNoteBody);
+$("note-title")?.addEventListener("input", resizeNoteBody);
 
 /** @param {VisitReportResult} result */
-function renderResult(result) {
+function   renderResult(result) {
   updateOutputVisibility();
   $("result-area").style.opacity = "";
-  $("note-title").placeholder = "";
+  clearNoteTitle();
   clearNoteBody();
 
-  $("note-title").value = result.megaMinnie.salesforceNote.title;
+  setNoteTitle(result.megaMinnie.salesforceNote.title);
   setNoteBodyMarkdown(result.megaMinnie.salesforceNote.body);
 
   renderSalesforceLink(result);
@@ -5534,7 +6001,7 @@ async function syncToSalesforce() {
     sfSearchInput?.focus();
     return;
   }
-  const title = $("note-title").value.trim();
+  const title = getNoteTitle();
   const body = getNoteBodyMarkdown();
   if (!title || !body) {
     alert("Notitietitel en -tekst mogen niet leeg zijn.");
@@ -5646,7 +6113,7 @@ initTasksEventsControls({
 const shareReportEmail = initShareReportEmail({
   getReportContext: () => {
     if (!hasUitgewerktResult()) return null;
-    const meetingSubject = $("note-title")?.value.trim() ?? "";
+    const meetingSubject = getNoteTitle();
     const reportBody = getNoteBodyMarkdown();
     if (!meetingSubject || !reportBody) return null;
 
@@ -5700,15 +6167,22 @@ realtimeController = createRealtimeInterviewController({
   onStateChange: (rtState) => {
     if (conversationPanelMode !== "realtime-qa") return;
     setConversationRecordingUi(Boolean(rtState.active || rtState.connecting));
+    if ((rtState.connecting || rtState.active) && !realtimeQaDraftActive) {
+      beginRealtimeQaDraft();
+    }
     updateProcessUi();
   },
   onTranscriptUpdate: (transcript) => {
     lastRealtimeTranscript = transcript;
     if (conversationPanelMode !== "realtime-qa") return;
+    updateRealtimeQaDraft(transcript);
     scheduleRealtimeFinishCheckFromTranscript(transcript);
   },
   onTurn: (turn) => {
     if (conversationPanelMode !== "realtime-qa") return;
+    if (isRealtimeConversationRunning()) {
+      updateRealtimeQaDraft(realtimeController?.getTranscript?.() || lastRealtimeTranscript);
+    }
     if (turn.role !== "user") return;
     if (!isRealtimeConversationRunning()) return;
     maybeHandleRealtimeQaVoiceCommand(turn.text);
@@ -5716,11 +6190,14 @@ realtimeController = createRealtimeInterviewController({
   onSpeechStopped: ({ pendingUserText, transcript }) => {
     if (conversationPanelMode !== "realtime-qa") return;
     if (!isRealtimeConversationRunning()) return;
+    lastRealtimeTranscript = transcript;
+    updateRealtimeQaDraft(transcript);
     maybeHandleRealtimeQaVoiceCommand(pendingUserText);
     scheduleRealtimeFinishCheckFromTranscript(transcript);
   },
   onError: (message) => {
     setRealtimeStatus("Fout bij realtime sessie");
+    endRealtimeQaDraft({ restoreResult: true });
     showFeedback(message, "error");
   },
   onDebugEvent: (message) => {
@@ -5743,6 +6220,11 @@ reviewInlineListenController = createRealtimeInterviewController({
   passiveListen: true,
   setStatus: updateReviewStatus,
   onSpeechStarted: () => handleReviewInlineSpeechStarted(),
+  onTranscriptUpdate: (transcript) => {
+    if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
+    const userText = extractLastRealtimeUserText(transcript);
+    if (userText) maybeHandleReviewVoiceCommand(userText);
+  },
   onTurn: (turn) => {
     if (turn.role === "user") handleReviewInlineUserTurn(turn.text);
   },
@@ -5750,23 +6232,28 @@ reviewInlineListenController = createRealtimeInterviewController({
     handleReviewInlineSpeechStopped(ctx);
   },
   onConnectionLost: () => {
-    if (state.reviewPlayback.active) {
-      updateReviewStatus("Verbinding herstellen…");
-      window.setTimeout(() => void ensureReviewInlineListen(), 500);
-    }
+    if (!REVIEW_INLINE_LISTEN_ENABLED || !state.reviewPlayback.active) return;
+    updateReviewStatus("Verbinding herstellen…");
+    window.setTimeout(() => void ensureReviewInlineListen(), 500);
   },
   onStateChange: ({ active, connecting }) => {
     updateVoiceCorrectUi();
     if (
-      !active &&
-      !connecting &&
-      state.reviewPlayback.active &&
-      !reviewInlineCorrection.finalizeInFlight
+      !REVIEW_INLINE_LISTEN_ENABLED ||
+      active ||
+      connecting ||
+      !state.reviewPlayback.active ||
+      reviewInlineCorrection.finalizeInFlight
     ) {
-      window.setTimeout(() => void ensureReviewInlineListen(), 400);
+      return;
     }
+    window.setTimeout(() => void ensureReviewInlineListen(), 400);
   },
   onError: () => {
+    if (!REVIEW_INLINE_LISTEN_ENABLED) {
+      showFeedback("Realtime luisteren mislukt.", "error");
+      return;
+    }
     if (state.reviewPlayback.active) {
       updateReviewStatus("Verbinding herstellen…");
       window.setTimeout(() => void ensureReviewInlineListen(), 800);

@@ -7,9 +7,9 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image
 from rembg import remove
-from scipy.ndimage import convolve, gaussian_filter, map_coordinates
+from scipy.ndimage import convolve, distance_transform_edt, gaussian_filter, map_coordinates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,14 +53,50 @@ def prepare_foreground(
 
 
 def inpaint_background(original: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """Vul het personagegebied op met een zachte achtergrond."""
+    """Vul personagegebied met dichtstbijzijnde achtergrondkleur (geen spook)."""
     mask = alpha > 20
-    dilated = gaussian_filter(mask.astype(np.float32), sigma=6) > 0.08
-    blurred = gaussian_filter(original.astype(np.float32), sigma=14)
-    out = original.astype(np.float32).copy()
+    if not mask.any():
+        return original.copy()
+
+    inv = ~mask
+    if not inv.any():
+        return original.copy()
+
+    _, indices = distance_transform_edt(inv, return_indices=True)
+    out = original.copy()
+    out[mask] = original[indices[0][mask], indices[1][mask]]
+
+    softened = gaussian_filter(mask.astype(np.float32), sigma=4) > 0.08
+    blurred = gaussian_filter(out.astype(np.float32), sigma=2)
     for c in range(3):
-        out[:, :, c] = np.where(dilated, blurred[:, :, c], out[:, :, c])
+        out[:, :, c] = np.where(softened, blurred[:, :, c], out[:, :, c])
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def clean_cutout_fringe(fg: np.ndarray) -> np.ndarray:
+    """Verwijder grijze rembg-schaduwen en maak alpha hard."""
+    out = fg.copy()
+    alpha = out[:, :, 3].astype(np.float32)
+    rgb = out[:, :, :3].astype(np.float32)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    saturation = np.divide(
+        mx - mn,
+        mx,
+        out=np.zeros_like(mx),
+        where=mx > 8,
+    )
+
+    visible = alpha > 20
+    grey_shadow = visible & (saturation < 0.14) & (mx < 175) & (mn < 125)
+    out[grey_shadow, 3] = 0
+    out[grey_shadow, :3] = 0
+
+    remain = out[:, :, 3] > 0
+    out[:, :, 3] = np.where(remain, 255, 0).astype(np.uint8)
+    out[~remain, :3] = 0
+    return out
 
 
 def motion_blur_horizontal(rgb: np.ndarray, size: int) -> np.ndarray:
@@ -213,9 +249,15 @@ def build_frames(
     orig_np = rgba_to_np(original)
 
     print("Scheid voorgrond (MegaMinnie)…")
-    fg_cutout = remove(original)
+    fg_cutout = remove(
+        original,
+        alpha_matting=True,
+        alpha_matting_foreground_threshold=240,
+        alpha_matting_background_threshold=20,
+        alpha_matting_erode_size=10,
+    )
     fg_np_orig = rgba_to_np(fg_cutout)
-    alpha = fg_np_orig[:, :, 3]
+    fg_np_orig = clean_cutout_fringe(fg_np_orig)
     fg_np = prepare_foreground(fg_np_orig)
     body_mask, cape_mask = character_masks(fg_np)
     cape_px = int(cape_mask.sum())
@@ -223,24 +265,35 @@ def build_frames(
     if cape_px < 5000:
         print("Waarschuwing: weinig cape-pixels — animatie kan onzichtbaar zijn.")
 
-    print("Bereid achtergrond voor…")
-    bg_clean = inpaint_background(orig_np[:, :, :3], alpha)
-    tile = np.concatenate([bg_clean, bg_clean], axis=1)
     h, w = orig_np.shape[:2]
-    bg_static = motion_blur_horizontal(bg_clean, MOTION_BLUR)
-
     fg_h, fg_w = fg_np.shape[:2]
-    scroll_px = w
     base_x = (w - fg_w) // 2
     base_y = (h - fg_h) // 2
 
+    placed_alpha = np.zeros((h, w), dtype=np.uint8)
+    y0 = max(0, base_y)
+    x0 = max(0, base_x)
+    y1 = min(h, base_y + fg_h)
+    x1 = min(w, base_x + fg_w)
+    fy0 = y0 - base_y
+    fx0 = x0 - base_x
+    fy1 = fy0 + (y1 - y0)
+    fx1 = fx0 + (x1 - x0)
+    placed_alpha[y0:y1, x0:x1] = fg_np[fy0:fy1, fx0:fx1, 3]
+
+    print("Bereid achtergrond voor…")
+    bg_clean = inpaint_background(orig_np[:, :, :3], placed_alpha)
+    tile = np.concatenate([bg_clean, bg_clean], axis=1)
+    bg_static = bg_clean
+
+    scroll_px = w
     fg_ys, fg_xs = np.where(fg_np[:, :, 3] > 12)
-    pad_x, pad_y = 48, 36
+    pad_x, pad_top, pad_bottom = 48, 36, 8
     subject_box = (
         max(0, base_x + int(fg_xs.min()) - pad_x),
-        max(0, base_y + int(fg_ys.min()) - pad_y),
+        max(0, base_y + int(fg_ys.min()) - pad_top),
         min(w, base_x + int(fg_xs.max()) + pad_x),
-        min(h, base_y + int(fg_ys.max()) + pad_y),
+        min(h, base_y + int(fg_ys.max()) + pad_bottom),
     )
 
     total_frames = max(2, int(round(fps * duration_sec)))
@@ -264,14 +317,9 @@ def build_frames(
         ).astype(np.uint8)
 
         fg_frame = warp_layer(fg_np.copy(), cape_mask, body_mask, phase)
-        sharp_fg = fg_frame.copy()
-        sharp_fg[:, :, :3] = np.array(
-            Image.fromarray(sharp_fg).filter(ImageFilter.UnsharpMask(radius=1.1, percent=95, threshold=2))
-        )[:, :, :3]
 
         for bg_fast, target in ((bg_scroll, frames), (bg_static, frames_web)):
             frame_rgb = composite(fg_frame, bg_fast, base_x, base_y)
-            frame_rgb = composite(sharp_fg, frame_rgb, base_x, base_y)
             target.append(Image.fromarray(frame_rgb, "RGB"))
 
         if (i + 1) % 12 == 0 or i + 1 == total_frames:

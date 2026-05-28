@@ -12,11 +12,11 @@ afterEach(() => {
 });
 
 describe("whisper-config", () => {
-  it("cloud quality default is gpt-4o-transcribe", () => {
+  it("cloud quality default is gpt-4o-mini-transcribe", () => {
     delete process.env.WHISPER_BASE_URL;
     delete process.env.WHISPER_MODEL;
     delete process.env.WHISPER_PROFILE;
-    expect(getWhisperModel()).toBe("gpt-4o-transcribe");
+    expect(getWhisperModel()).toBe("gpt-4o-mini-transcribe");
     expect(getTranscriptionProfile()).toBe("quality");
   });
 

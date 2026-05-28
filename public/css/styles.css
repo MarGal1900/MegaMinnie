@@ -577,7 +577,6 @@ body {
   width: 4.75rem;
   height: auto;
   z-index: 2;
-  filter: drop-shadow(0 8px 18px rgba(26, 35, 50, 0.28));
   animation: megaminnie-fly 4.2s ease-in-out infinite;
   pointer-events: none;
   object-fit: cover;
@@ -706,7 +705,6 @@ body {
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--surface-2);
-  box-shadow: 0 4px 16px rgba(26, 35, 50, 0.1);
 }
 
 .mini-megaminnie__character {
@@ -720,7 +718,6 @@ body {
 
 .input-hub__drop.is-processing .mini-megaminnie__scene {
   border-color: var(--accent-soft);
-  box-shadow: 0 4px 20px rgba(26, 35, 50, 0.14);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -745,10 +742,16 @@ body {
 }
 
 .input-hub__actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.5rem;
+  width: 100%;
+}
+
+.input-hub__actions .btn--mode {
+  width: 100%;
   justify-content: center;
+  text-align: center;
 }
 
 .input-hub__actions .btn--record-compact {
@@ -1896,6 +1899,39 @@ button[hidden] {
   color: var(--ink);
 }
 
+.note-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.note-block:focus-within {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.note-body__title {
+  display: block;
+  width: 100%;
+  padding: 0.75rem 0.75rem 0.35rem;
+  font: inherit;
+  font-weight: 700;
+  font-size: 1.05rem;
+  line-height: 1.35;
+  color: var(--ink);
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+
+.note-body__title[contenteditable]:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-muted);
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .note-body__gap {
   display: block;
   height: 0.45em;
@@ -1913,17 +1949,21 @@ button[hidden] {
 #note-body {
   display: block;
   width: 100%;
-  min-height: 14rem;
+  min-height: 12rem;
+  padding: 0.35rem 0.75rem 0.75rem;
   overflow-y: hidden;
   resize: none;
   line-height: 1.55;
   field-sizing: content;
+  border: 0;
+  background: transparent;
+  outline: none;
 }
 
 @supports not (field-sizing: content) {
   .note-body,
   #note-body {
-    min-height: 20rem;
+    min-height: 18rem;
   }
 }
 
@@ -2540,6 +2580,27 @@ button[hidden] {
   to {
     transform: rotate(360deg);
   }
+}
+
+.result-area.is-realtime-qa-draft {
+  opacity: 1;
+}
+
+.result-area.is-realtime-qa-draft .note-body,
+.result-area.is-realtime-qa-draft .note-body__title {
+  color: var(--ink);
+}
+
+.result-area.is-realtime-qa-draft .field__label::after {
+  content: " — live";
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+
+.result-area.is-realtime-qa-draft .note-body[contenteditable="false"],
+.result-area.is-realtime-qa-draft .note-body__title[contenteditable="false"] {
+  cursor: default;
+  user-select: text;
 }
 
 .panel--output.is-busy .result-area {

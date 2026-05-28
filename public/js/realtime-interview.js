@@ -1,8 +1,11 @@
 import { apiPost } from "./api.js";
 
 const OPENAI_REALTIME_WEBRTC_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
+export const REALTIME_QA_OPENING_TEXT = "Hallo";
 const OPENING_PROMPT =
-  "Begin nu meteen met precies het woord 'Hallo'. Zeg daarna nog niets anders en wacht op antwoord van de gebruiker.";
+  `Zeg nu hardop uitsluitend het ene woord "${REALTIME_QA_OPENING_TEXT}". ` +
+  "Geen andere woorden, geen extra zin. Wacht daarna stil tot de gebruiker antwoordt.";
+const OPENING_GREETING_FALLBACK_MS = 1500;
 const CORRECTION_OPENING_PROMPT =
   "De gebruiker wil het voorgelezen verslag corrigeren of aanvullen. " +
   "Begin met exact te vragen: 'Wat wil je corrigeren of aanvullen?' " +
@@ -92,6 +95,26 @@ export function readRealtimeTranscriptText(payload) {
 }
 
 /**
+ * Bouwt een live transcript inclusief nog niet afgeronde user/assistant regels.
+ * @param {{ role: "assistant"|"user"; text: string }[]} turns
+ * @param {string} [pendingUser]
+ * @param {string} [pendingAssistant]
+ * @returns {string}
+ */
+export function buildLiveRealtimeTranscript(turns, pendingUser = "", pendingAssistant = "") {
+  /** @type {string[]} */
+  const lines = (turns || []).map((turn) => {
+    const label = turn.role === "assistant" ? "Assistent" : "Gebruiker";
+    return `[${label}]: ${turn.text}`;
+  });
+  const userPending = String(pendingUser || "").replace(/\s+/g, " ").trim();
+  const assistantPending = String(pendingAssistant || "").replace(/\s+/g, " ").trim();
+  if (userPending) lines.push(`[Gebruiker]: ${userPending}`);
+  if (assistantPending) lines.push(`[Assistent]: ${assistantPending}`);
+  return lines.join("\n");
+}
+
+/**
  * @typedef {{
  *   setStatus: (status: string) => void;
  *   onStateChange?: (state: { active: boolean; connecting: boolean }) => void;
@@ -122,6 +145,7 @@ export function createRealtimeInterviewController(options) {
   let listenOnly = defaultListenOnly;
   let correctionDialogue = defaultCorrectionDialogue;
   let passiveListen = defaultPassiveListen;
+  let skipOpeningGreeting = false;
   /** @type {RTCPeerConnection | null} */
   let peer = null;
   /** @type {RTCDataChannel | null} */
@@ -135,9 +159,15 @@ export function createRealtimeInterviewController(options) {
   let correctionDialogueActive = false;
   let active = false;
   let connecting = false;
+  let openingGreetingSent = false;
+  let dataChannelReady = false;
+  let remoteTrackReady = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let openingGreetingFallbackTimer = null;
   /** @type {{ role: "assistant"|"user"; text: string }[]} */
   let turns = [];
   let pendingUserTranscript = "";
+  let pendingAssistantTranscript = "";
   /** @type {ReturnType<typeof setTimeout> | null} */
   let speechStoppedTimer = null;
 
@@ -157,6 +187,9 @@ export function createRealtimeInterviewController(options) {
       })
       .join("\n");
 
+  const buildLiveTranscript = () =>
+    buildLiveRealtimeTranscript(turns, pendingUserTranscript, pendingAssistantTranscript);
+
   const buildUserTranscript = () =>
     turns
       .filter((turn) => turn.role === "user")
@@ -166,7 +199,93 @@ export function createRealtimeInterviewController(options) {
       .trim();
 
   const emitTranscript = () => {
-    options.onTranscriptUpdate?.(buildTranscript());
+    options.onTranscriptUpdate?.(buildLiveTranscript());
+  };
+
+  const flushPendingTurns = () => {
+    const user = pendingUserTranscript.replace(/\s+/g, " ").trim();
+    if (user) {
+      pendingUserTranscript = "";
+      const last = turns[turns.length - 1];
+      if (!(last && last.role === "user" && last.text.toLowerCase() === user.toLowerCase())) {
+        turns.push({ role: "user", text: user });
+      }
+    }
+    const assistant = pendingAssistantTranscript.replace(/\s+/g, " ").trim();
+    if (assistant) {
+      pendingAssistantTranscript = "";
+      const last = turns[turns.length - 1];
+      if (
+        !(last && last.role === "assistant" && last.text.toLowerCase() === assistant.toLowerCase())
+      ) {
+        turns.push({ role: "assistant", text: assistant });
+      }
+    }
+  };
+
+  const resetOpeningGreetingState = () => {
+    openingGreetingSent = false;
+    dataChannelReady = false;
+    remoteTrackReady = false;
+    if (openingGreetingFallbackTimer) {
+      clearTimeout(openingGreetingFallbackTimer);
+      openingGreetingFallbackTimer = null;
+    }
+  };
+
+  const ensureRemoteAudio = () => {
+    if (remoteAudio) return remoteAudio;
+    remoteAudio = new Audio();
+    remoteAudio.autoplay = true;
+    remoteAudio.playsInline = true;
+    remoteAudio.volume = 1;
+    return remoteAudio;
+  };
+
+  const sendOpeningGreeting = () => {
+    if (skipOpeningGreeting || listenOnly || passiveListen || openingGreetingSent) return false;
+    if (!dataChannel || dataChannel.readyState !== "open") return false;
+    openingGreetingSent = true;
+    if (openingGreetingFallbackTimer) {
+      clearTimeout(openingGreetingFallbackTimer);
+      openingGreetingFallbackTimer = null;
+    }
+    const instructions =
+      correctionDialogue || correctionDialogueActive
+        ? CORRECTION_OPENING_PROMPT
+        : OPENING_PROMPT;
+    dataChannel.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions,
+        },
+      }),
+    );
+    setStatus(
+      correctionDialogue || correctionDialogueActive
+        ? "Correctie bespreken…"
+        : `MegaMinnie: ${REALTIME_QA_OPENING_TEXT}…`,
+    );
+    return true;
+  };
+
+  const maybeSendOpeningGreeting = () => {
+    if (openingGreetingSent || listenOnly || passiveListen) return;
+    if (!dataChannelReady) return;
+    if (!remoteTrackReady) return;
+    sendOpeningGreeting();
+  };
+
+  const scheduleOpeningGreetingFallback = () => {
+    if (openingGreetingFallbackTimer) clearTimeout(openingGreetingFallbackTimer);
+    openingGreetingFallbackTimer = setTimeout(() => {
+      openingGreetingFallbackTimer = null;
+      if (openingGreetingSent || listenOnly || passiveListen || !dataChannelReady) return;
+      remoteTrackReady = true;
+      sendOpeningGreeting();
+    }, OPENING_GREETING_FALLBACK_MS);
   };
 
   /** @param {"assistant"|"user"} role @param {string} rawText */
@@ -176,6 +295,8 @@ export function createRealtimeInterviewController(options) {
     const last = turns[turns.length - 1];
     if (last && last.role === role && last.text.toLowerCase() === text.toLowerCase()) return;
     turns.push({ role, text });
+    if (role === "user") pendingUserTranscript = "";
+    if (role === "assistant") pendingAssistantTranscript = "";
     options.onTurn?.({ role, text });
     emitTranscript();
   };
@@ -198,11 +319,13 @@ export function createRealtimeInterviewController(options) {
   };
 
   const cleanup = () => {
+    resetOpeningGreetingState();
     if (speechStoppedTimer) {
       clearTimeout(speechStoppedTimer);
       speechStoppedTimer = null;
     }
     pendingUserTranscript = "";
+    pendingAssistantTranscript = "";
     correctionDialogueActive = false;
     mutedRemoteStream = null;
     if (dataChannel) {
@@ -297,7 +420,7 @@ export function createRealtimeInterviewController(options) {
       pendingUserTranscript = "";
       options.onSpeechStopped?.({
         pendingUserText,
-        transcript: buildTranscript(),
+        transcript: buildLiveTranscript(),
       });
     }, 900);
   };
@@ -305,7 +428,22 @@ export function createRealtimeInterviewController(options) {
   const handleTranscriptionSideEffects = (type, payload) => {
     if (type === "conversation.item.input_audio_transcription.delta") {
       const delta = typeof payload?.delta === "string" ? payload.delta : "";
-      if (delta) pendingUserTranscript += delta;
+      if (delta) {
+        pendingUserTranscript += delta;
+        emitTranscript();
+      }
+      return;
+    }
+    if (
+      type === "response.audio_transcript.delta" ||
+      type === "response.output_audio_transcript.delta" ||
+      type === "response.output_text.delta"
+    ) {
+      const delta = typeof payload?.delta === "string" ? payload.delta : "";
+      if (delta) {
+        pendingAssistantTranscript += delta;
+        emitTranscript();
+      }
       return;
     }
     if (
@@ -313,6 +451,14 @@ export function createRealtimeInterviewController(options) {
       type === "input_audio_transcription.completed"
     ) {
       pendingUserTranscript = "";
+      return;
+    }
+    if (
+      type === "response.audio_transcript.done" ||
+      type === "response.output_audio_transcript.done" ||
+      type === "response.output_text.done"
+    ) {
+      pendingAssistantTranscript = "";
       return;
     }
     if (type === "input_audio_buffer.speech_stopped") {
@@ -332,16 +478,22 @@ export function createRealtimeInterviewController(options) {
       }
       return;
     }
+    if (eventType === "response.created") {
+      pendingAssistantTranscript = "";
+      setStatus("Assistent antwoordt…");
+      return;
+    }
     if (
       eventType.startsWith("response.audio") ||
-      eventType.startsWith("response.output_audio") ||
-      eventType === "response.created"
+      eventType.startsWith("response.output_audio")
     ) {
       setStatus("Assistent antwoordt…");
       return;
     }
     if (eventType === "response.done") {
+      pendingAssistantTranscript = "";
       setStatus("Luistert…");
+      emitTranscript();
     }
   };
 
@@ -350,22 +502,15 @@ export function createRealtimeInterviewController(options) {
     dataChannel = peer.createDataChannel("oai-events");
     dataChannel.addEventListener("open", () => {
       emitDebug("Data channel open");
+      dataChannelReady = true;
       if (listenOnly) {
         if (!passiveListen) {
           setStatus("Spreek je correctie in…");
         }
         return;
       }
-      setStatus(correctionDialogue ? "Correctie bespreken…" : "Luistert…");
-      dataChannel?.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: correctionDialogue ? CORRECTION_OPENING_PROMPT : OPENING_PROMPT,
-          },
-        }),
-      );
+      maybeSendOpeningGreeting();
+      scheduleOpeningGreetingFallback();
     });
     dataChannel.addEventListener("message", (event) => {
       try {
@@ -388,6 +533,9 @@ export function createRealtimeInterviewController(options) {
 
   const setupPeer = () => {
     peer = new RTCPeerConnection();
+    if (!listenOnly) {
+      ensureRemoteAudio();
+    }
     peer.ontrack = (event) => {
       if (listenOnly && !correctionDialogueActive) {
         mutedRemoteStream = event.streams[0] ?? null;
@@ -396,15 +544,13 @@ export function createRealtimeInterviewController(options) {
         });
         return;
       }
-      if (!remoteAudio) {
-        remoteAudio = new Audio();
-        remoteAudio.autoplay = true;
-        remoteAudio.playsInline = true;
-      }
-      remoteAudio.srcObject = event.streams[0];
-      void remoteAudio.play().catch(() => {
+      remoteTrackReady = true;
+      const audio = ensureRemoteAudio();
+      audio.srcObject = event.streams[0];
+      void audio.play().catch(() => {
         setStatus("Assistent antwoordt…");
       });
+      maybeSendOpeningGreeting();
     };
     peer.onconnectionstatechange = () => {
       if (!peer) return;
@@ -477,11 +623,13 @@ export function createRealtimeInterviewController(options) {
   };
 
   const start = async (startOverrides = {}) => {
-    if (active || connecting) return;
+    if (active || connecting) return false;
     sessionUrl = startOverrides.sessionUrl ?? defaultSessionUrl;
     listenOnly = startOverrides.listenOnly ?? defaultListenOnly;
     correctionDialogue = startOverrides.correctionDialogue ?? defaultCorrectionDialogue;
     passiveListen = startOverrides.passiveListen ?? defaultPassiveListen;
+    skipOpeningGreeting = startOverrides.skipOpeningGreeting === true;
+    resetOpeningGreetingState();
     turns = [];
     emitTranscript();
     updateState({ connecting: true });
@@ -517,26 +665,33 @@ export function createRealtimeInterviewController(options) {
       }
       const message = toFriendlyRealtimeError(err, FALLBACK_REALTIME_ERROR);
       options.onError?.(message);
+      return false;
     }
+    return true;
   };
 
   const stop = (status = "Gestopt") => {
     cleanup();
     updateState({ active: false, connecting: false });
-    setStatus(status);
+    if (status) setStatus(status);
   };
 
   const consumeTranscript = () => {
+    flushPendingTurns();
     const transcript = buildTranscript().trim();
     turns = [];
+    pendingUserTranscript = "";
+    pendingAssistantTranscript = "";
     emitTranscript();
     return transcript;
   };
 
   const consumeUserTranscript = () => {
+    flushPendingTurns();
     const transcript = buildUserTranscript();
     turns = [];
     pendingUserTranscript = "";
+    pendingAssistantTranscript = "";
     emitTranscript();
     return transcript;
   };
@@ -549,25 +704,15 @@ export function createRealtimeInterviewController(options) {
       mutedRemoteStream.getTracks().forEach((track) => {
         track.enabled = true;
       });
-      if (!remoteAudio) {
-        remoteAudio = new Audio();
-        remoteAudio.autoplay = true;
-        remoteAudio.playsInline = true;
-      }
-      remoteAudio.srcObject = mutedRemoteStream;
-      void remoteAudio.play().catch(() => {
+      remoteTrackReady = true;
+      const audio = ensureRemoteAudio();
+      audio.srcObject = mutedRemoteStream;
+      void audio.play().catch(() => {
         setStatus("Correctie bespreken…");
       });
     }
-    dataChannel.send(
-      JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          instructions: CORRECTION_OPENING_PROMPT,
-        },
-      }),
-    );
+    openingGreetingSent = false;
+    sendOpeningGreeting();
     setStatus("Wat wil je corrigeren of aanvullen?");
     return true;
   };
@@ -598,6 +743,11 @@ export function createRealtimeInterviewController(options) {
     }
   };
 
+  /** @param {string} text */
+  const seedAssistantTurn = (text) => {
+    addTurn("assistant", text);
+  };
+
   return {
     start,
     stop,
@@ -606,8 +756,9 @@ export function createRealtimeInterviewController(options) {
     beginCorrectionDialogue,
     endCorrectionDialogue,
     setMicEnabled,
+    seedAssistantTurn,
     isCorrectionDialogueActive: () => correctionDialogueActive,
-    getTranscript: () => buildTranscript().trim(),
+    getTranscript: () => buildLiveTranscript().trim(),
     getUserTranscript: () => buildUserTranscript(),
     isActive: () => active,
     isConnecting: () => connecting,

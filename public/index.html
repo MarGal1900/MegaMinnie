@@ -12,7 +12,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/css/styles.css?v=83" />
+    <link rel="stylesheet" href="/css/styles.css?v=85" />
   </head>
   <body>
     <div class="app">
@@ -158,7 +158,7 @@
                     <img
                       id="mini-megaminnie-gif"
                       class="mini-megaminnie__character"
-                      src="/images/megaminnie-animated-web.gif?v=15"
+                      src="/images/megaminnie-animated-web.gif?v=17"
                       alt=""
                       width="395"
                       height="247"
@@ -194,9 +194,14 @@
           </div>
 
           <div class="input-hub__actions">
-            <button type="button" id="btn-pick-files" class="btn btn--record btn--record-compact btn--mode">
+            <button
+              type="button"
+              id="btn-conversation"
+              class="btn btn--record btn--record-compact btn--mode"
+              aria-pressed="false"
+            >
               <span class="btn__dot" aria-hidden="true"></span>
-              Bestanden kiezen
+              <span id="conversation-label">Opname gesprek</span>
             </button>
             <button
               type="button"
@@ -206,15 +211,6 @@
             >
               <span class="btn__dot" aria-hidden="true"></span>
               Vraag &amp; Antwoord
-            </button>
-            <button
-              type="button"
-              id="btn-conversation"
-              class="btn btn--record btn--record-compact btn--mode"
-              aria-pressed="false"
-            >
-              <span class="btn__dot" aria-hidden="true"></span>
-              <span id="conversation-label">Opname gesprek</span>
             </button>
             <button
               type="button"
@@ -298,21 +294,28 @@
           hidden
         >
           <div id="result-area" class="result-area">
-            <label class="field">
-              <span class="field__label">Notitietitel</span>
-              <input type="text" id="note-title" />
-            </label>
-
-            <div class="field">
-              <div
-                id="note-body"
-                class="note-body"
-                contenteditable="true"
-                role="textbox"
-                aria-multiline="true"
-                aria-label="Uitwerking"
-                spellcheck="true"
-              ></div>
+            <div class="field note-field">
+              <span class="field__label">Notitie</span>
+              <div class="note-block">
+                <div
+                  id="note-title"
+                  class="note-body__title"
+                  contenteditable="true"
+                  role="textbox"
+                  aria-label="Titel"
+                  spellcheck="true"
+                  data-placeholder="Titel"
+                ></div>
+                <div
+                  id="note-body"
+                  class="note-body"
+                  contenteditable="true"
+                  role="textbox"
+                  aria-multiline="true"
+                  aria-label="Uitwerking"
+                  spellcheck="true"
+                ></div>
+              </div>
             </div>
 
             <section id="review-section" class="draft-toolbar" hidden>
@@ -537,7 +540,7 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=143"></script>
+    <script type="module" src="/js/app.js?v=161"></script>
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {

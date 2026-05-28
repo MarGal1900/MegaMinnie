@@ -35,7 +35,7 @@ WHISPER_API_KEY=local
 WHISPER_LOCAL_MODEL=Systran/faster-whisper-medium
 ```
 
-Cloud (zonder `WHISPER_BASE_URL`), standaard `WHISPER_PROFILE=quality` → `gpt-4o-transcribe`. Zet `WHISPER_PROFILE=diarize` voor gesprekken met meerdere sprekers (alleen cloud).
+Cloud (zonder `WHISPER_BASE_URL`), standaard `WHISPER_PROFILE=quality` → `gpt-4o-mini-transcribe`. Zet `WHISPER_PROFILE=diarize` voor gesprekken met meerdere sprekers (alleen cloud).
 
 ## Scripts
 

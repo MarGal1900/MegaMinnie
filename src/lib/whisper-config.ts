@@ -44,7 +44,7 @@ export function getWhisperModel(): string {
     case "legacy":
       return "whisper-1";
     default:
-      return "gpt-4o-transcribe";
+      return "gpt-4o-mini-transcribe";
   }
 }
 
