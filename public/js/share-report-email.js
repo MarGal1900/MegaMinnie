@@ -291,35 +291,33 @@ export function buildMailtoUrl(recipients, subject, body) {
 }
 
 /**
+ * Opent mailto / Outlook-compose zonder window.open (voorkomt lege tabs en dubbele pop-ups).
+ *
  * @param {string} url
  * @param {OutlookComposeTarget} [target]
- * @returns {boolean} false als het openen waarschijnlijk is geblokkeerd
  */
 export function openOutlookCompose(url, target) {
   const resolvedTarget = target ?? detectOutlookComposeTarget();
 
   if (resolvedTarget === "mobile") {
     window.location.assign(url);
-    return true;
-  }
-
-  const popup = window.open(url, "_blank", "noopener,noreferrer");
-  if (popup) {
-    try {
-      popup.close();
-    } catch {
-      /* tab sluiten niet altijd mogelijk */
-    }
-    return true;
+    return;
   }
 
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.rel = "noopener noreferrer";
+  anchor.style.display = "none";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  return false;
+}
+
+/** @param {number} ms */
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 /**
@@ -395,7 +393,9 @@ export async function shareReportViaEmail(options) {
   });
 
   downloadBlobAttachment(filename, docxBlob);
-  const mailOpened = openOutlookCompose(prepared.url, prepared.target);
+  // Korte pauze zodat download- en mail-dialoog niet tegelijk verschijnen
+  await delay(400);
+  openOutlookCompose(prepared.url, prepared.target);
 
   return {
     ok: true,
@@ -403,7 +403,6 @@ export async function shareReportViaEmail(options) {
     subject: prepared.subject,
     target: prepared.target,
     filename,
-    mailOpened,
     composeUrl: prepared.url,
   };
 }
@@ -444,15 +443,10 @@ export function syncShareEmailLink(anchor, ctx) {
 
 /**
  * @param {string} filename
- * @param {boolean} mailOpened
  * @returns {string}
  */
-export function formatAttachmentShareSuccessMessage(filename, mailOpened) {
-  const base = `${filename} is gedownload. Voeg dit bestand handmatig toe als bijlage.`;
-  if (mailOpened) {
-    return `${base} Je mailprogramma wordt geopend.`;
-  }
-  return `${base} Open je mail handmatig via de knop hieronder.`;
+export function formatAttachmentShareSuccessMessage(filename) {
+  return `${filename} is gedownload. Voeg dit bestand handmatig toe als bijlage. Je mailprogramma wordt geopend.`;
 }
 
 /**
@@ -477,51 +471,9 @@ export function initShareReportEmail(deps) {
   const section = document.getElementById("share-report-section");
   const link = document.getElementById("btn-share-email");
 
-  /** @type {string | null} */
-  let lastComposeUrl = null;
-
-  const retryButton = document.createElement("button");
-  retryButton.type = "button";
-  retryButton.id = "btn-share-email-retry";
-  retryButton.className = "btn btn--ghost btn--block share-report__retry";
-  retryButton.textContent = "Open mail opnieuw";
-  retryButton.hidden = true;
-
-  retryButton.addEventListener("click", () => {
-    if (!lastComposeUrl) return;
-    const opened = openOutlookCompose(
-      lastComposeUrl,
-      detectOutlookComposeTarget(),
-    );
-    if (opened) {
-      retryButton.hidden = true;
-      deps.onFeedback?.(
-        "Je mailprogramma wordt geopend. Vergeet niet het gedownloade bestand als bijlage toe te voegen.",
-        "success",
-      );
-    } else {
-      deps.onFeedback?.(
-        "Je mailprogramma kon niet automatisch worden geopend. Probeer opnieuw of open je mail handmatig.",
-        "warning",
-      );
-    }
-  });
-
-  if (section && link?.parentElement === section) {
-    section.append(retryButton);
-  }
-
-  const setRetryVisible = (show) => {
-    retryButton.hidden = !show;
-  };
-
   const refreshLink = () => {
     if (section?.hidden) return;
     syncShareEmailLink(link, deps.getReportContext());
-    if (link?.getAttribute("aria-disabled") === "true") {
-      lastComposeUrl = null;
-      setRetryVisible(false);
-    }
   };
 
   const runShare = async () => {
@@ -542,16 +494,12 @@ export function initShareReportEmail(deps) {
 
       if (!result.ok) {
         deps.onFeedback?.(result.error, "error");
-        lastComposeUrl = null;
-        setRetryVisible(false);
         return;
       }
 
-      lastComposeUrl = result.composeUrl;
-      setRetryVisible(!result.mailOpened);
       deps.onFeedback?.(
-        formatAttachmentShareSuccessMessage(result.filename, result.mailOpened),
-        result.mailOpened ? "success" : "warning",
+        formatAttachmentShareSuccessMessage(result.filename),
+        "success",
       );
     } catch {
       deps.onFeedback?.(
@@ -578,10 +526,6 @@ export function initShareReportEmail(deps) {
     /** @param {boolean} show */
     updateVisibility(show) {
       if (section) section.hidden = !show;
-      if (!show) {
-        lastComposeUrl = null;
-        setRetryVisible(false);
-      }
       if (show) refreshLink();
     },
     refreshLink,

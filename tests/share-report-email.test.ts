@@ -229,11 +229,8 @@ describe("prepareShareReportEmail", () => {
 
 describe("formatAttachmentShareSuccessMessage", () => {
   it("vermeldt download en handmatige bijlage", () => {
-    expect(
-      formatAttachmentShareSuccessMessage("gespreksverslag-test.docx", true),
-    ).toContain("gedownload");
-    expect(
-      formatAttachmentShareSuccessMessage("gespreksverslag-test.docx", false),
-    ).toContain("hieronder");
+    const message = formatAttachmentShareSuccessMessage("gespreksverslag-test.docx");
+    expect(message).toContain("gedownload");
+    expect(message).toContain("mailprogramma");
   });
 });
