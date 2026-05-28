@@ -1383,6 +1383,10 @@ button[hidden] {
   pointer-events: none;
 }
 
+.share-report__retry {
+  margin-top: 0.5rem;
+}
+
 @media (max-width: 720px) {
   .draft-toolbar__sep {
     display: none;

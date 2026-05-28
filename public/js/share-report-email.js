@@ -1,3 +1,5 @@
+import { buildGespreksverslagDocxBlob } from "./gespreksverslag-docx.bundle.js";
+
 /** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string }} ShareReportContext */
 /** @typedef {"desktop" | "mobile"} OutlookComposeTarget */
 
@@ -95,6 +97,100 @@ export function extractMeetingDateFromReport(title, body) {
   }
 
   return new Date();
+}
+
+/**
+ * @param {string} title
+ * @returns {string}
+ */
+export function sanitizeFilenameSegment(title) {
+  const normalized = title
+    .trim()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+  return normalized.slice(0, 80) || "notitie";
+}
+
+/**
+ * @param {string} meetingSubject
+ * @returns {string}
+ */
+export function buildReportAttachmentFilename(meetingSubject) {
+  return `gespreksverslag-${sanitizeFilenameSegment(meetingSubject)}.docx`;
+}
+
+/**
+ * @param {string} title
+ * @returns {string | null}
+ */
+export function extractDateTimeLabelFromTitle(title) {
+  const match = title.match(
+    /\b(\d{1,2})-(\d{1,2})-(20\d{2})(?:,\s*(\d{1,2}):(\d{2}))?\b/,
+  );
+  if (!match) return null;
+  if (match[4] != null) {
+    return `${match[1]}-${match[2]}-${match[3]}, ${match[4]}:${match[5]}`;
+  }
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+/**
+ * @param {{ meetingSubject: string; dateTimeLabel?: string | null; reportBody: string }} input
+ * @returns {string}
+ */
+export function buildReportAttachmentContent(input) {
+  const lines = [`Notitietitel: ${input.meetingSubject.trim() || "Meeting"}`];
+  const dateTime = input.dateTimeLabel?.trim();
+  if (dateTime) {
+    lines.push(`Datum/tijd: ${dateTime}`);
+  }
+  lines.push("", input.reportBody.trim());
+  return lines.join("\n");
+}
+
+/**
+ * @param {string} filename
+ * @param {Blob} blob
+ */
+export function downloadBlobAttachment(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * @param {string} meetingSubject
+ * @returns {string}
+ */
+export function buildGespreksverslagMailSubject(meetingSubject) {
+  const title = meetingSubject.trim() || "Meeting";
+  return `Gespreksverslag - ${title}`;
+}
+
+/**
+ * @returns {string}
+ */
+export function buildGespreksverslagMailBody() {
+  return [
+    "Beste,",
+    "",
+    "Bijgaand ontvang je het gespreksverslag.",
+    "",
+    "Let op: het verslag is zojuist gedownload. Voeg dit bestand handmatig toe als bijlage.",
+    "",
+    "Met vriendelijke groet,",
+  ].join("\n");
 }
 
 /**
@@ -197,7 +293,7 @@ export function buildMailtoUrl(recipients, subject, body) {
 /**
  * @param {string} url
  * @param {OutlookComposeTarget} [target]
- * @returns {boolean}
+ * @returns {boolean} false als het openen waarschijnlijk is geblokkeerd
  */
 export function openOutlookCompose(url, target) {
   const resolvedTarget = target ?? detectOutlookComposeTarget();
@@ -207,13 +303,23 @@ export function openOutlookCompose(url, target) {
     return true;
   }
 
+  const popup = window.open(url, "_blank", "noopener,noreferrer");
+  if (popup) {
+    try {
+      popup.close();
+    } catch {
+      /* tab sluiten niet altijd mogelijk */
+    }
+    return true;
+  }
+
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.rel = "noopener noreferrer";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  return true;
+  return false;
 }
 
 /**
@@ -242,17 +348,8 @@ export function prepareShareReportEmail(options) {
   }
 
   const target = options.composeTarget ?? detectOutlookComposeTarget();
-  const meetingDate =
-    options.meetingDate ??
-    extractMeetingDateFromReport(options.meetingSubject, reportBody);
-  const dateStr = formatMeetingDateNl(meetingDate);
-  const subject = buildShareEmailSubject(options.meetingSubject, dateStr);
-  const body = buildShareEmailBody({
-    meetingSubject: options.meetingSubject,
-    meetingDate: dateStr,
-    reportBody,
-    contactName: options.contactName,
-  });
+  const subject = buildGespreksverslagMailSubject(options.meetingSubject);
+  const body = buildGespreksverslagMailBody();
   const composeUrl = buildOutlookComposeUrl(recipients, subject, body, target);
   const lengthError = getOutlookComposeLengthError(target, composeUrl.length);
 
@@ -265,18 +362,49 @@ export function prepareShareReportEmail(options) {
 
 /**
  * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
- * @returns {{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget } | { ok: false; error: string }}
+ * @returns {string | null}
  */
-export function shareReportViaEmail(options) {
+export function resolveReportDateTimeLabel(options) {
+  const fromTitle = extractDateTimeLabelFromTitle(options.meetingSubject);
+  if (fromTitle) return fromTitle;
+
+  const meetingDate =
+    options.meetingDate ??
+    extractMeetingDateFromReport(
+      options.meetingSubject,
+      options.reportBody?.trim() ?? "",
+    );
+  return formatMeetingDateNl(meetingDate);
+}
+
+/**
+ * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
+ * @returns {Promise<{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget; filename: string; mailOpened: boolean; composeUrl: string } | { ok: false; error: string }>}
+ */
+export async function shareReportViaEmail(options) {
   const prepared = prepareShareReportEmail(options);
   if (!prepared.ok) return prepared;
 
-  openOutlookCompose(prepared.url, prepared.target);
+  const meetingSubject = options.meetingSubject.trim() || "Meeting";
+  const reportBody = options.reportBody.trim();
+  const filename = buildReportAttachmentFilename(meetingSubject);
+  const docxBlob = await buildGespreksverslagDocxBlob({
+    meetingSubject,
+    dateTimeLabel: resolveReportDateTimeLabel(options),
+    reportBody,
+  });
+
+  downloadBlobAttachment(filename, docxBlob);
+  const mailOpened = openOutlookCompose(prepared.url, prepared.target);
+
   return {
     ok: true,
     recipients: prepared.recipients,
     subject: prepared.subject,
     target: prepared.target,
+    filename,
+    mailOpened,
+    composeUrl: prepared.url,
   };
 }
 
@@ -309,9 +437,22 @@ export function syncShareEmailLink(anchor, ctx) {
     return;
   }
 
-  anchor.href = result.url;
+  anchor.href = "#";
   anchor.removeAttribute("aria-disabled");
   delete anchor.dataset.shareError;
+}
+
+/**
+ * @param {string} filename
+ * @param {boolean} mailOpened
+ * @returns {string}
+ */
+export function formatAttachmentShareSuccessMessage(filename, mailOpened) {
+  const base = `${filename} is gedownload. Voeg dit bestand handmatig toe als bijlage.`;
+  if (mailOpened) {
+    return `${base} Je mailprogramma wordt geopend.`;
+  }
+  return `${base} Open je mail handmatig via de knop hieronder.`;
 }
 
 /**
@@ -336,49 +477,98 @@ export function initShareReportEmail(deps) {
   const section = document.getElementById("share-report-section");
   const link = document.getElementById("btn-share-email");
 
+  /** @type {string | null} */
+  let lastComposeUrl = null;
+
+  const retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.id = "btn-share-email-retry";
+  retryButton.className = "btn btn--ghost btn--block share-report__retry";
+  retryButton.textContent = "Open mail opnieuw";
+  retryButton.hidden = true;
+
+  retryButton.addEventListener("click", () => {
+    if (!lastComposeUrl) return;
+    const opened = openOutlookCompose(
+      lastComposeUrl,
+      detectOutlookComposeTarget(),
+    );
+    if (opened) {
+      retryButton.hidden = true;
+      deps.onFeedback?.(
+        "Je mailprogramma wordt geopend. Vergeet niet het gedownloade bestand als bijlage toe te voegen.",
+        "success",
+      );
+    } else {
+      deps.onFeedback?.(
+        "Je mailprogramma kon niet automatisch worden geopend. Probeer opnieuw of open je mail handmatig.",
+        "warning",
+      );
+    }
+  });
+
+  if (section && link?.parentElement === section) {
+    section.append(retryButton);
+  }
+
+  const setRetryVisible = (show) => {
+    retryButton.hidden = !show;
+  };
+
   const refreshLink = () => {
     if (section?.hidden) return;
     syncShareEmailLink(link, deps.getReportContext());
+    if (link?.getAttribute("aria-disabled") === "true") {
+      lastComposeUrl = null;
+      setRetryVisible(false);
+    }
   };
 
-  link?.addEventListener("click", (event) => {
-    const href = link.getAttribute("href");
-    if (href?.startsWith("mailto:") || href?.startsWith(OUTLOOK_MOBILE_COMPOSE_BASE)) {
-      const ctx = deps.getReportContext();
-      const result = ctx
-        ? prepareShareReportEmail({
-            recipientsInput: ctx.recipientsInput ?? "",
-            meetingSubject: ctx.meetingSubject,
-            reportBody: ctx.reportBody,
-            meetingDate: ctx.meetingDate,
-            contactName: ctx.contactName,
-          })
-        : null;
-      if (result?.ok) {
-        deps.onFeedback?.(
-          formatOutlookComposeSuccessMessage(result.target, result.recipients.length),
-          "success",
-        );
-      }
-      return;
-    }
-
-    event.preventDefault();
+  const runShare = async () => {
     const ctx = deps.getReportContext();
     if (!ctx) {
       deps.onFeedback?.("Laat MegaMinnie eerst het verslag uitwerken.", "error");
       return;
     }
 
-    const result = prepareShareReportEmail({
-      recipientsInput: ctx.recipientsInput ?? "",
-      meetingSubject: ctx.meetingSubject,
-      reportBody: ctx.reportBody,
-      meetingDate: ctx.meetingDate,
-      contactName: ctx.contactName,
-    });
+    try {
+      const result = await shareReportViaEmail({
+        recipientsInput: ctx.recipientsInput ?? "",
+        meetingSubject: ctx.meetingSubject,
+        reportBody: ctx.reportBody,
+        meetingDate: ctx.meetingDate,
+        contactName: ctx.contactName,
+      });
 
-    deps.onFeedback?.(result.error, "error");
+      if (!result.ok) {
+        deps.onFeedback?.(result.error, "error");
+        lastComposeUrl = null;
+        setRetryVisible(false);
+        return;
+      }
+
+      lastComposeUrl = result.composeUrl;
+      setRetryVisible(!result.mailOpened);
+      deps.onFeedback?.(
+        formatAttachmentShareSuccessMessage(result.filename, result.mailOpened),
+        result.mailOpened ? "success" : "warning",
+      );
+    } catch {
+      deps.onFeedback?.(
+        "Het gespreksverslag kon niet worden aangemaakt. Probeer het opnieuw.",
+        "error",
+      );
+    }
+  };
+
+  link?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (link.getAttribute("aria-disabled") === "true") {
+      const err = link.dataset.shareError;
+      deps.onFeedback?.(err ?? "Er is nog geen verslag om te delen.", "error");
+      return;
+    }
+    void runShare();
   });
 
   document.getElementById("note-title")?.addEventListener("input", refreshLink);
@@ -388,6 +578,10 @@ export function initShareReportEmail(deps) {
     /** @param {boolean} show */
     updateVisibility(show) {
       if (section) section.hidden = !show;
+      if (!show) {
+        lastComposeUrl = null;
+        setRetryVisible(false);
+      }
       if (show) refreshLink();
     },
     refreshLink,

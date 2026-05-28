@@ -1,17 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
   OUTLOOK_MOBILE_COMPOSE_BASE,
+  buildGespreksverslagMailBody,
+  buildGespreksverslagMailSubject,
   buildMailtoComposeUrl,
   buildOutlookComposeUrl,
   buildOutlookMobileComposeUrl,
+  buildReportAttachmentContent,
+  buildReportAttachmentFilename,
   buildShareEmailBody,
   buildShareEmailSubject,
   detectOutlookComposeTarget,
+  extractDateTimeLabelFromTitle,
   extractMeetingDateFromReport,
+  formatAttachmentShareSuccessMessage,
   formatMeetingDateNl,
   formatOutlookComposeSuccessMessage,
   getOutlookComposeLengthError,
   parseRecipientEmails,
+  prepareShareReportEmail,
+  sanitizeFilenameSegment,
 } from "../public/js/share-report-email.js";
 
 describe("parseRecipientEmails", () => {
@@ -144,5 +152,88 @@ describe("formatOutlookComposeSuccessMessage", () => {
     expect(formatOutlookComposeSuccessMessage("mobile", 0)).toBe("Outlook-app geopend.");
     expect(formatOutlookComposeSuccessMessage("mobile", 2)).toContain("Outlook-app");
     expect(formatOutlookComposeSuccessMessage("desktop", 1)).toContain("standaard mailprogramma");
+  });
+});
+
+describe("sanitizeFilenameSegment", () => {
+  it("maakt titels veilig voor bestandsnamen", () => {
+    expect(sanitizeFilenameSegment("Interview (deels) 28-05-2026, 11:27")).toBe(
+      "interview-deels-28-05-2026-1127",
+    );
+  });
+});
+
+describe("buildReportAttachmentFilename", () => {
+  it("gebruikt het gevraagde bestandsnaamformaat", () => {
+    expect(buildReportAttachmentFilename("Kick-off Acme")).toBe(
+      "gespreksverslag-kick-off-acme.docx",
+    );
+  });
+});
+
+describe("extractDateTimeLabelFromTitle", () => {
+  it("haalt datum en tijd uit de notitietitel", () => {
+    expect(extractDateTimeLabelFromTitle("Interview 28-05-2026, 11:27")).toBe(
+      "28-05-2026, 11:27",
+    );
+  });
+});
+
+describe("buildReportAttachmentContent", () => {
+  it("bevat titel, datum en verslag", () => {
+    const content = buildReportAttachmentContent({
+      meetingSubject: "Interview 28-05-2026, 11:27",
+      dateTimeLabel: "28-05-2026, 11:27",
+      reportBody: "**Samenvatting:**\nGoed gesprek.",
+    });
+
+    expect(content).toContain("Notitietitel: Interview 28-05-2026, 11:27");
+    expect(content).toContain("Datum/tijd: 28-05-2026, 11:27");
+    expect(content).toContain("**Samenvatting:**");
+  });
+});
+
+describe("buildGespreksverslagMailSubject", () => {
+  it("bouwt onderwerp voor mailto", () => {
+    expect(buildGespreksverslagMailSubject("Kick-off Acme")).toBe(
+      "Gespreksverslag - Kick-off Acme",
+    );
+  });
+});
+
+describe("buildGespreksverslagMailBody", () => {
+  it("bevat korte begeleidende tekst zonder verslag", () => {
+    const body = buildGespreksverslagMailBody();
+    expect(body).toContain("Beste,");
+    expect(body).toContain("handmatig toe als bijlage");
+    expect(body).not.toContain("**");
+  });
+});
+
+describe("prepareShareReportEmail", () => {
+  it("gebruikt korte mailtekst en geen volledig verslag in body", () => {
+    const longReport = "Regel\n".repeat(400);
+    const result = prepareShareReportEmail({
+      recipientsInput: "klant@bedrijf.nl",
+      meetingSubject: "Kick-off Acme",
+      reportBody: longReport,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.subject).toBe("Gespreksverslag - Kick-off Acme");
+    expect(result.url).toContain(encodeURIComponent("Gespreksverslag - Kick-off Acme"));
+    expect(result.url).not.toContain(encodeURIComponent(longReport.slice(0, 40)));
+  });
+});
+
+describe("formatAttachmentShareSuccessMessage", () => {
+  it("vermeldt download en handmatige bijlage", () => {
+    expect(
+      formatAttachmentShareSuccessMessage("gespreksverslag-test.docx", true),
+    ).toContain("gedownload");
+    expect(
+      formatAttachmentShareSuccessMessage("gespreksverslag-test.docx", false),
+    ).toContain("hieronder");
   });
 });
