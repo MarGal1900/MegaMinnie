@@ -453,6 +453,26 @@ body {
   margin-top: 0.35rem;
 }
 
+.panel--input.is-manual-open .input-hub__drop,
+.panel--input.is-manual-open .input-hub__actions,
+.panel--input.is-manual-open .input-summary,
+.panel--input.is-manual-open .input-hub__hint,
+.panel--input.is-manual-open .process-hint {
+  display: none !important;
+}
+
+.panel--input.is-manual-open .input-hub {
+  gap: 0.35rem;
+}
+
+.panel--input.is-manual-open .manual-panel {
+  display: block !important;
+}
+
+.panel--input.is-manual-open #hub-process-slot.process-area {
+  margin-top: 0.35rem;
+}
+
 /* During MegaMinnie processing: hide input chrome, keep dropzone GIF + steps */
 .panel--input.is-megaminnie-processing .input-hub__actions,
 .panel--input.is-megaminnie-processing .test-recordings,
@@ -1312,17 +1332,6 @@ button[hidden] {
 }
 
 /* Output */
-.result-source-badge {
-  margin: 0 0 0.75rem;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.result-source-badge[hidden] {
-  display: none !important;
-}
-
 .result-area .field {
   margin-bottom: 0.85rem;
 }
@@ -1361,21 +1370,66 @@ button[hidden] {
   background: var(--border);
 }
 
+.draft-toolbar__bar .btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  min-height: auto;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.draft-toolbar__bar .btn--icon svg {
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.draft-toolbar__bar .btn--icon svg .icon-stroke,
+.draft-toolbar__bar .btn--icon svg.icon-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.draft-toolbar__bar .btn--icon.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.draft-toolbar__bar .btn--icon-danger:hover:not(:disabled):not(.is-disabled) {
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+  border-color: rgba(180, 35, 24, 0.18);
+}
+
+.draft-toolbar__bar .btn--record.btn--icon {
+  position: relative;
+  width: 2.2rem;
+  height: 2.2rem;
+  min-height: auto;
+  padding: 0;
+  border-radius: 8px;
+  flex-direction: row;
+}
+
+.draft-toolbar__bar .btn--record.btn--icon .btn__dot {
+  position: absolute;
+  top: 0.28rem;
+  right: 0.28rem;
+  width: 0.45rem;
+  height: 0.45rem;
+}
+
 .draft-toolbar__bar .btn--compact {
   padding: 0.32rem 0.6rem;
   font-size: 0.8rem;
   border-radius: 7px;
-}
-
-.draft-toolbar__bar .btn--record-compact {
-  min-height: auto;
-  padding: 0.32rem 0.65rem;
-  font-size: 0.8rem;
-}
-
-.draft-toolbar__bar .btn--record-compact .btn__dot {
-  width: 0.55rem;
-  height: 0.55rem;
 }
 
 .draft-toolbar__status {
@@ -1877,11 +1931,42 @@ button[hidden] {
   margin-bottom: 1rem;
 }
 
+.subsection--tasks:not([hidden]) {
+  margin-top: 0.75rem;
+}
+
+.tasks-events-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.tasks-events-toolbar[hidden] {
+  display: none !important;
+}
+
 .subsection__title {
   margin: 0 0 0.5rem;
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--ink-muted);
+}
+
+.tasks-events-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.tasks-events-actions[hidden] {
+  display: none !important;
+}
+
+.tasks-events-actions .btn--block {
+  width: 100%;
+  margin-top: 0;
 }
 
 .card-list {
@@ -1917,6 +2002,57 @@ button[hidden] {
   gap: 0.5rem;
 }
 
+.card-list__item--task {
+  border-left-color: var(--accent);
+}
+
+.card-list__item--event {
+  border-left-color: #0e639c;
+}
+
+.card-list__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.card-list__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.card-list__item--draft {
+  box-shadow: inset 0 0 0 1px rgba(14, 99, 156, 0.2);
+}
+
+.card-list__commit {
+  white-space: nowrap;
+}
+
+.card-list__kind {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+}
+
+.card-list__kind--task {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.card-list__kind--event {
+  background: rgba(14, 99, 156, 0.12);
+  color: #0e639c;
+}
+
 .card-list__fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1926,6 +2062,193 @@ button[hidden] {
 
 .card-list__fields .field--full {
   grid-column: 1 / -1;
+}
+
+.card-list__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+}
+
+.card-list__fields input[type="date"] {
+  min-height: 2.1rem;
+}
+
+.nl-time-field__trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  min-height: 2.1rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-align: left;
+}
+
+.nl-time-field__trigger:hover {
+  border-color: var(--accent);
+}
+
+.nl-time-field__icon {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.nl-time-field__icon::before,
+.nl-time-field__icon::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: currentColor;
+  transform-origin: bottom center;
+}
+
+.nl-time-field__icon::before {
+  width: 2px;
+  height: 0.28rem;
+  transform: translate(-50%, -100%) rotate(90deg);
+}
+
+.nl-time-field__icon::after {
+  width: 2px;
+  height: 0.2rem;
+  transform: translate(-50%, -100%) rotate(0deg);
+}
+
+.nl-time-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.nl-time-picker[hidden] {
+  display: none !important;
+}
+
+.nl-time-picker__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.nl-time-picker__sheet {
+  position: relative;
+  width: min(100%, 24rem);
+  margin: 0 auto;
+  padding: 1rem 1rem 1.1rem;
+  border-radius: 18px 18px 0 0;
+  background: var(--surface);
+  box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.18);
+}
+
+.nl-time-picker__mode {
+  margin: 0;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.nl-time-picker__display {
+  margin: 0.35rem 0 0.75rem;
+  text-align: center;
+  font-size: 2.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.nl-time-picker__face {
+  position: relative;
+  width: min(100%, 17.5rem);
+  aspect-ratio: 1;
+  margin: 0 auto 0.75rem;
+  border-radius: 50%;
+  background: var(--surface-2);
+}
+
+.nl-time-picker__option {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transform: translate(-50%, -50%) rotate(var(--angle)) translateY(calc(-1 * min(37%, 6.5rem)))
+    rotate(calc(-1 * var(--angle)));
+}
+
+.nl-time-picker__option.is-selected {
+  background: var(--accent);
+  color: #fff;
+}
+
+.nl-time-picker__fine {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.nl-time-picker__fine-label {
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+  min-width: 3rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.nl-time-picker__fine-btn {
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.nl-time-picker__actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+@media (min-width: 640px) {
+  .nl-time-picker {
+    align-items: center;
+    padding: 1rem;
+  }
+
+  .nl-time-picker__sheet {
+    border-radius: 18px;
+  }
 }
 
 .field--compact .field__label {
@@ -1940,7 +2263,13 @@ button[hidden] {
 }
 
 .card-list__remove {
-  align-self: flex-end;
+  flex-shrink: 0;
+}
+
+.card-list__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.35rem;
 }
 
 .sf-panel {

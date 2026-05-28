@@ -3,10 +3,12 @@ import {
   detectInterviewCommand,
   detectInterviewCommandAtTail,
   detectRealtimeQaVoiceCommand,
+  detectReviewVoiceCommand,
   isNextQuestionCommand,
   isRealtimeQaCancelCommand,
   isRealtimeQaStopCommand,
   parseAnswerTranscript,
+  stripReviewVoiceCommand,
 } from "../public/js/interview-commands.js";
 
 describe("isNextQuestionCommand", () => {
@@ -93,6 +95,29 @@ describe("realtime Q&A voice commands", () => {
     expect(detectRealtimeQaVoiceCommand("klaar")).toBe(null);
     expect(detectRealtimeQaVoiceCommand("einde verslag")).toBe(null);
     expect(detectRealtimeQaVoiceCommand("afronden")).toBe(null);
+  });
+});
+
+describe("review playback voice commands", () => {
+  it("herkent correctie en voorlezen", () => {
+    expect(detectReviewVoiceCommand("correctie")).toBe("correctie");
+    expect(detectReviewVoiceCommand("Correctie.")).toBe("correctie");
+    expect(detectReviewVoiceCommand("Correctie. De datum moet morgen zijn.")).toBe(
+      "correctie",
+    );
+    expect(detectReviewVoiceCommand("voorlezen")).toBe("voorlezen");
+    expect(detectReviewVoiceCommand("Voor lezen")).toBe("voorlezen");
+  });
+
+  it("negeert inhoudelijke zinnen", () => {
+    expect(detectReviewVoiceCommand("de correctie staat in alinea twee")).toBe(null);
+    expect(detectReviewVoiceCommand("kunnen we dit voorlezen aan de klant")).toBe(null);
+  });
+
+  it("strippt commando uit correctietekst", () => {
+    expect(stripReviewVoiceCommand("Correctie. De datum moet morgen zijn.")).toBe(
+      "De datum moet morgen zijn.",
+    );
   });
 });
 

@@ -23,6 +23,111 @@ export function formatDate(iso) {
   }
 }
 
+const EU_DATE_INPUT = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/;
+const EU_TIME_INPUT = /^(\d{1,2}):(\d{2})$/;
+
+/** @param {string} iso ISO-datum (YYYY-MM-DD) of Europese invoer */
+export function isoDateToEuropean(iso) {
+  const s = String(iso ?? "").trim();
+  if (!s) return "";
+  if (EU_DATE_INPUT.test(s)) return s.replace(/\//g, "-");
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!isoMatch) return s;
+  return `${isoMatch[3]}-${isoMatch[2]}-${isoMatch[1]}`;
+}
+
+/** @param {string} eu Europese datum (dd-mm-jjjj) */
+export function europeanDateToIso(eu) {
+  const s = String(eu ?? "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(EU_DATE_INPUT);
+  if (!m) return "";
+  const day = Number(m[1]);
+  const month = Number(m[2]);
+  const year = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+  const iso = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const check = new Date(`${iso}T12:00:00`);
+  if (
+    check.getFullYear() !== year ||
+    check.getMonth() + 1 !== month ||
+    check.getDate() !== day
+  ) {
+    return "";
+  }
+  return iso;
+}
+
+/** @param {string} iso */
+export function isoDateTimeToEuropeanDate(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return isoDateToEuropean(String(iso).slice(0, 10));
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
+  } catch {
+    return "";
+  }
+}
+
+/** @param {string} iso */
+export function isoDateTimeToEuropeanTime(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return "";
+  }
+}
+
+/** @param {string} value ISO (YYYY-MM-DD) of Europese datum */
+export function toDateInputValue(value) {
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return europeanDateToIso(s);
+}
+
+/** @param {string} iso */
+export function isoDatePartFromDateTime(iso) {
+  if (!iso) return "";
+  const isoMatch = String(iso).match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  } catch {
+    return "";
+  }
+}
+
+/** @param {string} dateIso @param {string} [timeValue="00:00"] */
+export function combineIsoDateAndTime(dateIso, timeValue = "00:00") {
+  const date = toDateInputValue(dateIso);
+  if (!date) return "";
+  const tm = String(timeValue ?? "00:00").trim().match(EU_TIME_INPUT);
+  if (!tm) return "";
+  const hours = Number(tm[1]);
+  const minutes = Number(tm[2]);
+  if (hours > 23 || minutes > 59) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  const local = new Date(`${date}T${pad(hours)}:${pad(minutes)}:00`);
+  if (Number.isNaN(local.getTime())) return "";
+  return local.toISOString();
+}
+
+/** @param {string} dateEu @param {string} [timeEu="00:00"] */
+export function europeanDateTimeToIso(dateEu, timeEu = "00:00") {
+  return combineIsoDateAndTime(dateEu, timeEu);
+}
+
 /** @param {string} start @param {string} end */
 export function formatDateTimeRange(start, end) {
   try {

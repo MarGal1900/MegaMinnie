@@ -14,6 +14,8 @@ import { isKeepInputEnabled } from "./lib/keep-input.js";
 import { isRealtimeInterviewEnabled } from "./lib/realtime-config.js";
 import { getSalesforceConfigStatus } from "./lib/salesforce-config.js";
 import { checkSalesforceConnection } from "./lib/salesforce-health.js";
+import { getMailSignature } from "./lib/mail-config.js";
+import { getDefaultAccountManager } from "./lib/task-assignee-config.js";
 import { salesforceRouter } from "./routes/salesforce.js";
 import { realtimeRouter } from "./routes/realtime.js";
 import { visitReportRouter } from "./routes/visit-report.js";
@@ -78,6 +80,8 @@ app.get("/health", async (_req, res) => {
     apiKeyRequired: isApiKeyRequired(),
     keepInput: isKeepInputEnabled(),
     realtimeInterviewEnabled: isRealtimeInterviewEnabled(),
+    mailSignature: getMailSignature(),
+    defaultAccountManager: getDefaultAccountManager(),
     hint,
   });
 });

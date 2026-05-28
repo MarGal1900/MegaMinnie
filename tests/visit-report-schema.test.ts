@@ -11,6 +11,7 @@ describe("MegaMinnieOutputSchema", () => {
           activityDate: "2026-05-22",
           priority: "Normal",
           status: "Not Started",
+          assignee: "Accountmanager",
         },
       ],
       events: [

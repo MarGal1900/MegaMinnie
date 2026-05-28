@@ -3,6 +3,11 @@ import { apiPost } from "./api.js";
 const OPENAI_REALTIME_WEBRTC_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 const OPENING_PROMPT =
   "Begin nu meteen met precies het woord 'Hallo'. Zeg daarna nog niets anders en wacht op antwoord van de gebruiker.";
+const CORRECTION_OPENING_PROMPT =
+  "De gebruiker wil het voorgelezen verslag corrigeren of aanvullen. " +
+  "Begin met exact te vragen: 'Wat wil je corrigeren of aanvullen?' " +
+  "Luister daarna naar de correctie, stel kort een verduidelijkingsvraag als dat nodig is, " +
+  "en bevestig kort wat je hebt verstaan. Houd antwoorden kort.";
 const FALLBACK_REALTIME_ERROR = "Realtime sessie kon niet worden gestart.";
 
 function isDebugRuntime() {
@@ -95,6 +100,12 @@ export function readRealtimeTranscriptText(payload) {
  *   onTranscriptUpdate?: (transcript: string) => void;
  *   onTurn?: (turn: { role: "assistant"|"user"; text: string }) => void;
  *   onSpeechStopped?: (context: { pendingUserText: string; transcript: string }) => void;
+ *   sessionUrl?: string;
+ *   listenOnly?: boolean;
+ *   correctionDialogue?: boolean;
+ *   passiveListen?: boolean;
+ *   onSpeechStarted?: () => void;
+ *   onConnectionLost?: () => void;
  * }} RealtimeInterviewOptions
  */
 
@@ -102,6 +113,15 @@ export function readRealtimeTranscriptText(payload) {
  * @param {RealtimeInterviewOptions} options
  */
 export function createRealtimeInterviewController(options) {
+  const defaultSessionUrl = options.sessionUrl || "/api/realtime/session";
+  const defaultListenOnly = options.listenOnly === true;
+  const defaultCorrectionDialogue = options.correctionDialogue === true;
+  const defaultPassiveListen = options.passiveListen === true;
+  /** @type {string} */
+  let sessionUrl = defaultSessionUrl;
+  let listenOnly = defaultListenOnly;
+  let correctionDialogue = defaultCorrectionDialogue;
+  let passiveListen = defaultPassiveListen;
   /** @type {RTCPeerConnection | null} */
   let peer = null;
   /** @type {RTCDataChannel | null} */
@@ -110,6 +130,9 @@ export function createRealtimeInterviewController(options) {
   let localStream = null;
   /** @type {HTMLAudioElement | null} */
   let remoteAudio = null;
+  /** @type {MediaStream | null} */
+  let mutedRemoteStream = null;
+  let correctionDialogueActive = false;
   let active = false;
   let connecting = false;
   /** @type {{ role: "assistant"|"user"; text: string }[]} */
@@ -133,6 +156,14 @@ export function createRealtimeInterviewController(options) {
         return `[${label}]: ${turn.text}`;
       })
       .join("\n");
+
+  const buildUserTranscript = () =>
+    turns
+      .filter((turn) => turn.role === "user")
+      .map((turn) => turn.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
 
   const emitTranscript = () => {
     options.onTranscriptUpdate?.(buildTranscript());
@@ -172,6 +203,8 @@ export function createRealtimeInterviewController(options) {
       speechStoppedTimer = null;
     }
     pendingUserTranscript = "";
+    correctionDialogueActive = false;
+    mutedRemoteStream = null;
     if (dataChannel) {
       try {
         dataChannel.close();
@@ -291,7 +324,12 @@ export function createRealtimeInterviewController(options) {
     if (!eventType) return;
     if (eventType === "input_audio_buffer.speech_started") {
       pendingUserTranscript = "";
-      setStatus("Luistert…");
+      if (passiveListen) {
+        options.onSpeechStarted?.();
+      }
+      if (!passiveListen) {
+        setStatus("Luistert…");
+      }
       return;
     }
     if (
@@ -312,13 +350,19 @@ export function createRealtimeInterviewController(options) {
     dataChannel = peer.createDataChannel("oai-events");
     dataChannel.addEventListener("open", () => {
       emitDebug("Data channel open");
-      setStatus("Luistert…");
+      if (listenOnly) {
+        if (!passiveListen) {
+          setStatus("Spreek je correctie in…");
+        }
+        return;
+      }
+      setStatus(correctionDialogue ? "Correctie bespreken…" : "Luistert…");
       dataChannel?.send(
         JSON.stringify({
           type: "response.create",
           response: {
             modalities: ["audio", "text"],
-            instructions: OPENING_PROMPT,
+            instructions: correctionDialogue ? CORRECTION_OPENING_PROMPT : OPENING_PROMPT,
           },
         }),
       );
@@ -345,6 +389,13 @@ export function createRealtimeInterviewController(options) {
   const setupPeer = () => {
     peer = new RTCPeerConnection();
     peer.ontrack = (event) => {
+      if (listenOnly && !correctionDialogueActive) {
+        mutedRemoteStream = event.streams[0] ?? null;
+        mutedRemoteStream?.getTracks().forEach((track) => {
+          track.enabled = false;
+        });
+        return;
+      }
       if (!remoteAudio) {
         remoteAudio = new Audio();
         remoteAudio.autoplay = true;
@@ -359,8 +410,18 @@ export function createRealtimeInterviewController(options) {
       if (!peer) return;
       emitDebug(`RTCPeerConnection state: ${peer.connectionState}`);
       if (peer.connectionState === "connected") {
-        setStatus("Luistert…");
-      } else if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
+        if (!passiveListen) setStatus("Luistert…");
+      } else if (
+        peer.connectionState === "failed" ||
+        peer.connectionState === "disconnected"
+      ) {
+        if (passiveListen) {
+          emitDebug(`RTCPeerConnection passive ${peer.connectionState}`);
+          cleanup();
+          updateState({ active: false, connecting: false });
+          options.onConnectionLost?.();
+          return;
+        }
         stop("Fout bij realtime sessie");
         options.onError?.("Realtime verbinding verbroken.");
       }
@@ -415,14 +476,20 @@ export function createRealtimeInterviewController(options) {
     await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
   };
 
-  const start = async () => {
+  const start = async (startOverrides = {}) => {
     if (active || connecting) return;
+    sessionUrl = startOverrides.sessionUrl ?? defaultSessionUrl;
+    listenOnly = startOverrides.listenOnly ?? defaultListenOnly;
+    correctionDialogue = startOverrides.correctionDialogue ?? defaultCorrectionDialogue;
+    passiveListen = startOverrides.passiveListen ?? defaultPassiveListen;
     turns = [];
     emitTranscript();
     updateState({ connecting: true });
-    setStatus("Verbinden…");
+    if (!passiveListen) {
+      setStatus("Verbinden…");
+    }
     try {
-      const session = await apiPost("/api/realtime/session", {
+      const session = await apiPost(sessionUrl, {
         method: "POST",
       });
       emitDebug(`Realtime session bootstrap: ${JSON.stringify({ model: session?.model, voice: session?.voice })}`);
@@ -432,7 +499,15 @@ export function createRealtimeInterviewController(options) {
       setupPeer();
       await connectWebRtc(session);
       updateState({ active: true, connecting: false });
-      setStatus("Luistert…");
+      if (!passiveListen) {
+        setStatus(
+          listenOnly
+            ? "Spreek je correctie in…"
+            : correctionDialogue
+              ? "Correctie bespreken…"
+              : "Luistert…",
+        );
+      }
     } catch (err) {
       cleanup();
       updateState({ active: false, connecting: false });
@@ -458,11 +533,82 @@ export function createRealtimeInterviewController(options) {
     return transcript;
   };
 
+  const consumeUserTranscript = () => {
+    const transcript = buildUserTranscript();
+    turns = [];
+    pendingUserTranscript = "";
+    emitTranscript();
+    return transcript;
+  };
+
+  const beginCorrectionDialogue = () => {
+    if (!active || !dataChannel || dataChannel.readyState !== "open") return false;
+    correctionDialogueActive = true;
+    listenOnly = false;
+    if (mutedRemoteStream) {
+      mutedRemoteStream.getTracks().forEach((track) => {
+        track.enabled = true;
+      });
+      if (!remoteAudio) {
+        remoteAudio = new Audio();
+        remoteAudio.autoplay = true;
+        remoteAudio.playsInline = true;
+      }
+      remoteAudio.srcObject = mutedRemoteStream;
+      void remoteAudio.play().catch(() => {
+        setStatus("Correctie bespreken…");
+      });
+    }
+    dataChannel.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: CORRECTION_OPENING_PROMPT,
+        },
+      }),
+    );
+    setStatus("Wat wil je corrigeren of aanvullen?");
+    return true;
+  };
+
+  const endCorrectionDialogue = () => {
+    correctionDialogueActive = false;
+    listenOnly = defaultListenOnly;
+    if (remoteAudio) {
+      try {
+        remoteAudio.pause();
+        remoteAudio.srcObject = null;
+      } catch {
+        /* noop */
+      }
+    }
+    if (mutedRemoteStream) {
+      mutedRemoteStream.getTracks().forEach((track) => {
+        track.enabled = false;
+      });
+    }
+  };
+
+  const setMicEnabled = (enabled) => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach((track) => {
+        track.enabled = enabled;
+      });
+    }
+  };
+
   return {
     start,
     stop,
     consumeTranscript,
+    consumeUserTranscript,
+    beginCorrectionDialogue,
+    endCorrectionDialogue,
+    setMicEnabled,
+    isCorrectionDialogueActive: () => correctionDialogueActive,
     getTranscript: () => buildTranscript().trim(),
+    getUserTranscript: () => buildUserTranscript(),
     isActive: () => active,
     isConnecting: () => connecting,
   };

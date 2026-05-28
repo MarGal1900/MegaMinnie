@@ -30,6 +30,7 @@ Notitie body-structuur (salesforceNote):
 Regels:
 - Nederlands, geen verzonnen feiten. Onzeker: [?]. Onleesbaar: [onleesbaar].
 - activityDate: YYYY-MM-DD. events: ISO-8601 met tijdzone.
+- Voor elke taak: "assignee" = verantwoordelijke (standaard Accountmanager).
 - Lege arrays als geen taken/events.
 
 Antwoord ALLEEN met geldig JSON:

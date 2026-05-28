@@ -107,6 +107,51 @@ export function detectRealtimeQaVoiceCommand(text) {
   return null;
 }
 
+const REVIEW_CORRECTIE_COMMANDS = new Set(["correctie"]);
+const REVIEW_VOORLEZEN_COMMANDS = new Set(["voorlezen", "voor lezen"]);
+
+/** @param {string} text */
+export function isReviewCorrectieCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (REVIEW_CORRECTIE_COMMANDS.has(normalized)) return true;
+  return /^correctie[.!?,;:]*$/.test(normalized);
+}
+
+/** @param {string} text */
+export function isReviewVoorlezenCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (REVIEW_VOORLEZEN_COMMANDS.has(normalized)) return true;
+  return /^voorlezen[.!?,;:]*$/.test(normalized) || /^voor lezen[.!?,;:]*$/.test(normalized);
+}
+
+/** @param {string} text */
+export function startsWithReviewCorrectieCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /^correctie\b[.!?,;:]*\s+\S/.test(normalized);
+}
+
+/** @returns {"correctie"|"voorlezen"|null} */
+export function detectReviewVoiceCommand(text) {
+  if (isReviewVoorlezenCommand(text)) return "voorlezen";
+  if (isReviewCorrectieCommand(text)) return "correctie";
+  if (startsWithReviewCorrectieCommand(text)) return "correctie";
+  return null;
+}
+
+/** @param {string} text */
+export function stripReviewVoiceCommand(text) {
+  const original = typeof text === "string" ? text : "";
+  let cleaned = original.replace(/\s+/g, " ").trim();
+  cleaned = cleaned
+    .replace(/\b(correctie|voorlezen|voor lezen)\b[.!?,;:]*\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned;
+}
+
 export function parseAnswerTranscript(text) {
   const original = typeof text === "string" ? text : "";
   const normalized = original.replace(/\s+/g, " ").trim();

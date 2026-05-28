@@ -12,6 +12,7 @@ import {
   getRealtimeModel,
   getRealtimeTranscriptionModel,
   getRealtimeVoice,
+  getSupplementRealtimeInstructions,
   isRealtimeInterviewEnabled,
 } from "../lib/realtime-config.js";
 
@@ -189,7 +190,11 @@ export async function createRealtimeSession(
   };
 }
 
-realtimeRouter.post("/session", async (_req, res, next) => {
+async function handleRealtimeSession(
+  res: import("express").Response,
+  next: import("express").NextFunction,
+  instructions: string,
+) {
   try {
     const apiKey = getOpenAiApiKey();
     const prereq = validateRealtimeSessionPrereqs({
@@ -205,7 +210,7 @@ realtimeRouter.post("/session", async (_req, res, next) => {
       apiKey,
       model: getRealtimeModel(),
       voice: getRealtimeVoice(),
-      instructions: getRealtimeInstructions(),
+      instructions,
       transcriptionModel: getRealtimeTranscriptionModel(),
     });
 
@@ -219,6 +224,14 @@ realtimeRouter.post("/session", async (_req, res, next) => {
   } catch (err) {
     next(err);
   }
+}
+
+realtimeRouter.post("/session", async (_req, res, next) => {
+  await handleRealtimeSession(res, next, getRealtimeInstructions());
+});
+
+realtimeRouter.post("/session/supplement", async (_req, res, next) => {
+  await handleRealtimeSession(res, next, getSupplementRealtimeInstructions());
 });
 
 realtimeRouter.post("/speech", async (req, res, next) => {

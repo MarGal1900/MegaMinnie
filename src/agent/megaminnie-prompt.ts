@@ -33,6 +33,7 @@ Regels:
 - Onzekerheden markeer met [?] of "niet genoemd".
 - Geen verzonnen prijzen, contracten of namen.
 - activityDate voor taken: ISO-datum YYYY-MM-DD (vandaag of logische vervolgdatum).
+- Voor elke taak: veld "assignee" met de verantwoordelijke (standaard "Accountmanager" tenzij in het verslag iemand anders is genoemd).
 - events: ISO-8601 met tijdzone (bijv. 2026-05-20T14:00:00+02:00).
 - Taakduur events: minimaal 30 min tenzij anders genoemd.
 - Lege arrays als er geen taken of afspraken zijn.
@@ -50,7 +51,7 @@ Verplicht schema:
 {
   "salesforceNote": { "title": "...", "body": "..." },
   "customer": { "accountName": "...", "contactName": "...", "email": "..." },
-  "tasks": [],
+  "tasks": [{ "subject": "...", "description": "...", "activityDate": "YYYY-MM-DD", "assignee": "Accountmanager" }],
   "events": []
 }`;
 
@@ -82,7 +83,7 @@ export function buildExtendUserPrompt(
   existing: {
     title: string;
     body: string;
-    tasks: { subject: string; description?: string; activityDate: string }[];
+    tasks: { subject: string; description?: string; activityDate: string; assignee?: string }[];
     events: { subject: string; startDateTime: string; endDateTime: string }[];
   },
   supplementRawText: string,

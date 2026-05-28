@@ -1,4 +1,5 @@
 import type { MegaMinnieOutput } from "../types/visit-report.js";
+import { getDefaultAccountManager } from "../lib/task-assignee-config.js";
 import { getSalesforceConfigStatus } from "../lib/salesforce-config.js";
 import { getSalesforceConnection } from "./salesforce-connection.js";
 
@@ -40,6 +41,15 @@ function formatSfErrors(errors: unknown): string[] {
     }
     return String(e);
   });
+}
+
+function formatTaskDescription(task: MegaMinnieOutput["tasks"][number]): string | undefined {
+  const assignee = task.assignee?.trim() || getDefaultAccountManager();
+  const assigneeLine = assignee ? `Verantwoordelijke: ${assignee}` : "";
+  const body = task.description?.trim() ?? "";
+  if (assigneeLine && body) return `${assigneeLine}\n\n${body}`;
+  if (assigneeLine) return assigneeLine;
+  return body || undefined;
 }
 
 /** Notitie + optionele taken en events op gekoppeld record. */
@@ -88,12 +98,12 @@ export async function syncToSalesforce(
   for (const task of output.tasks) {
     const created = await conn.sobject("Task").create({
       Subject: task.subject,
-      Description: task.description,
+      Description: formatTaskDescription(task),
       ActivityDate: task.activityDate,
       Priority: task.priority,
       Status: task.status,
       WhatId: recordId,
-      OwnerId: ownerId,
+      OwnerId: task.ownerId ?? ownerId,
     });
     const ok = Boolean(created.success && created.id);
     if (ok && created.id) taskIds.push(created.id);

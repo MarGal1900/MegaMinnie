@@ -12,11 +12,17 @@ import { apiPost, formFields, setApiKey } from "./api.js";
 import {
   detectInterviewCommandAtTail,
   detectRealtimeQaVoiceCommand,
+  detectReviewVoiceCommand,
+  isReviewCorrectieCommand,
   parseAnswerTranscript,
+  startsWithReviewCorrectieCommand,
+  stripReviewVoiceCommand,
 } from "./interview-commands.js";
 import {
   renderTasksAndEvents,
   collectTasksEventsFromUi,
+  initTasksEventsControls,
+  setTasksEventsToolbarVisible,
 } from "./tasks-events.js";
 import {
   initConversationRecording,
@@ -27,10 +33,10 @@ import {
   isConversationRecording,
 } from "./conversation-recording.js";
 import { createRealtimeInterviewController } from "./realtime-interview.js";
-import { createOpenAiSpeechPlayback } from "./openai-speech.js";
+import { createOpenAiSpeechPlayback, prefetchOpenAiSpeech } from "./openai-speech.js";
 import { initShareReportEmail } from "./share-report-email.js";
 
-/** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string }} Task */
+/** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string; assignee?: string; ownerId?: string }} Task */
 /** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string; location?: string }} Event */
 /** @typedef {{ accountName?: string; contactName?: string; email?: string; phone?: string; opportunityName?: string }} CustomerHints */
 /** @typedef {{ id: string; type: string; name: string; subtitle?: string; score: number }} SalesforceRecordHit */
@@ -61,6 +67,8 @@ const state = {
   dryRun: true,
   keepInput: true,
   salesforceConfigured: false,
+  mailSignature: "",
+  defaultAccountManager: "Accountmanager",
   /** @type {SalesforceRecordHit | null} */
   sfSelected: null,
   /** Aanvulling op bestaand concept (los van eerste invoerhub) */
@@ -82,6 +90,12 @@ const state = {
     /** @type {string[]} */
     chunks: [],
     index: 0,
+    /** @type {{ resumeIndex: number; paragraphKey: string | null } | null} */
+    suspendForCorrection: null,
+    suppressLoopCleanup: false,
+    /** @type {string[]} */
+    chunkParagraphKeys: [],
+    ttsActive: false,
   },
   interview: {
     active: false,
@@ -178,7 +192,7 @@ let supplementAudioObjectUrl = null;
 let inputGeneration = 0;
 /** @type {number} Loopt op bij elke nieuwe processReport-aanroep. */
 let activeProcessId = 0;
-/** @type {1|2|null} Huidige verwerkingssubstap (transcriberen / uitwerken). */
+/** @type {1|2|null} Huidige verwerkingssubstap (verwerken / uitwerken). */
 let activeProcessingPhase = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let progressTickerId = null;
@@ -361,6 +375,34 @@ const conversationLabel = $("conversation-label");
 const btnPickFiles = $("btn-pick-files");
 const recordHint = $("record-hint");
 let realtimeController = null;
+/** @type {ReturnType<typeof createRealtimeInterviewController> | null} */
+let supplementRealtimeController = null;
+/** @type {ReturnType<typeof createRealtimeInterviewController> | null} */
+let reviewInlineListenController = null;
+
+const reviewInlineCorrection = {
+  active: false,
+  pendingInterrupt: false,
+  enteredViaCommand: false,
+  /** @type {string[]} */
+  segments: [],
+  flushedSegmentCount: 0,
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  debounceTimer: null,
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  resumeTimer: null,
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  interruptConfirmTimer: null,
+  applyInFlight: false,
+  finalizeInFlight: false,
+};
+
+const INLINE_CORRECTION_RESUME_MS = 5500;
+const INLINE_CORRECTION_EMPTY_RESUME_MS = 1200;
+const INLINE_INTERRUPT_CONFIRM_MS = 450;
+
+const REVIEW_PLAYBACK_STATUS =
+  'Zeg "Correctie" of spreek om te corrigeren — "Voorlezen" om verder te lezen';
 /** @type {ReturnType<typeof createOpenAiSpeechPlayback> | null} */
 let reviewSpeechPlayer = null;
 let lastRealtimeTranscript = "";
@@ -432,7 +474,7 @@ async function processRealtimeConversationTranscript(transcript) {
     phase: 2,
     progress: 50,
     transcribing: false,
-    message: "MegaMinnie werkt je realtime gesprek uit…",
+    message: "Uitwerken…",
   });
   hideFeedback();
 
@@ -609,7 +651,6 @@ const inputBusy = $("input-busy");
 const inputBusyText = $("input-busy-text");
 const btnCancelProcess = $("btn-cancel-process");
 const supplementFile = $("supplement-file");
-const btnSupplementPick = $("btn-supplement-pick");
 const supplementAudioReview = $("supplement-audio-review");
 const supplementAudioPreview = $("supplement-audio-preview");
 const btnSupplementRemoveAudio = $("btn-supplement-remove-audio");
@@ -621,7 +662,6 @@ const btnReviewPause = $("btn-review-pause");
 const btnReviewResume = $("btn-review-resume");
 const btnReviewStop = $("btn-review-stop");
 const btnVoiceCorrect = $("btn-voice-correct");
-const voiceCorrectLabel = $("voice-correct-label");
 const reviewStatus = $("review-status");
 const interviewPanel = $("interview-panel");
 const interviewStep = $("interview-step");
@@ -1428,18 +1468,46 @@ async function speakAndWait(text, { requireActive = true } = {}) {
   renderInterviewUi();
 }
 
-function buildReviewSpeechText() {
-  const parts = [];
+function buildReviewSpeechPlan() {
+  /** @type {string[]} */
+  const chunks = [];
+  /** @type {string[]} */
+  const chunkParagraphKeys = [];
+
+  /** @param {string} text @param {string} key */
+  const addText = (text, key) => {
+    for (const chunk of splitSpeechChunks(text)) {
+      chunks.push(chunk);
+      chunkParagraphKeys.push(key);
+    }
+  };
+
   const title = $("note-title")?.value.trim();
+  if (title) addText(`Titel: ${title}.`, "title");
+
   const body = getNoteBodyMarkdown().replace(/\*\*/g, "");
-  if (title) parts.push(`Titel: ${title}.`);
-  if (body) parts.push(`Notitie: ${body}`);
+  const paragraphs = body
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (paragraphs.length) {
+    paragraphs.forEach((para, i) => {
+      const prefix = i === 0 ? "Notitie: " : "";
+      addText(`${prefix}${para}`, `body:${i}`);
+    });
+  } else if (body.trim()) {
+    addText(`Notitie: ${body.trim()}`, "body:0");
+  }
 
   document.querySelectorAll("#tasks-list .card-list__item").forEach((li, i) => {
     const subject = li.querySelector(".task-subject")?.value.trim();
     if (!subject) return;
     const desc = li.querySelector(".task-description")?.value.trim();
-    parts.push(`Taak ${i + 1}: ${subject}${desc ? `. ${desc}` : ""}.`);
+    const assignee = li.querySelector(".task-assignee")?.value.trim();
+    let line = `Taak ${i + 1}: ${subject}`;
+    if (assignee) line += `, verantwoordelijke ${assignee}`;
+    if (desc) line += `. ${desc}`;
+    addText(`${line}.`, `task:${i}`);
   });
 
   document.querySelectorAll("#events-list .card-list__item").forEach((li, i) => {
@@ -1450,10 +1518,23 @@ function buildReviewSpeechText() {
     let line = `Agenda-item ${i + 1}: ${subject}`;
     if (location) line += `, locatie ${location}`;
     if (desc) line += `. ${desc}`;
-    parts.push(`${line}.`);
+    addText(`${line}.`, `event:${i}`);
   });
 
-  return parts.join(" ");
+  return { chunks, chunkParagraphKeys };
+}
+
+function buildReviewSpeechText() {
+  return buildReviewSpeechPlan().chunks.join(" ");
+}
+
+/** @param {{ resumeIndex: number; paragraphKey: string | null }} suspend @param {string[]} keys @param {number} chunkCount */
+function resolveReviewResumeChunkIndex(suspend, keys, chunkCount) {
+  if (suspend.paragraphKey) {
+    const paragraphStart = keys.indexOf(suspend.paragraphKey);
+    if (paragraphStart >= 0) return paragraphStart;
+  }
+  return Math.max(0, Math.min(suspend.resumeIndex, Math.max(0, chunkCount - 1)));
 }
 
 /** @param {string} text */
@@ -1463,10 +1544,14 @@ function splitSpeechChunks(text) {
   /** @type {string[]} */
   const chunks = [];
   let buf = "";
+  const maxLen = (chunkIndex) => (chunkIndex === 0 ? 120 : 320);
+  let chunkIndex = 0;
   for (const sentence of sentences) {
-    if (buf && (buf + sentence).length > 320) {
+    const limit = maxLen(chunkIndex);
+    if (buf && (buf + sentence).length > limit) {
       chunks.push(buf.trim());
       buf = sentence;
+      chunkIndex = chunks.length;
     } else {
       buf += sentence;
     }
@@ -1475,21 +1560,513 @@ function splitSpeechChunks(text) {
   return chunks;
 }
 
+function prefetchReviewSpeech() {
+  if (!hasUitgewerktResult()) return;
+  const chunks = splitSpeechChunks(buildReviewSpeechText());
+  if (chunks[0]) void prefetchOpenAiSpeech(chunks[0]);
+  if (chunks[1]) void prefetchOpenAiSpeech(chunks[1]);
+}
+
 function updateReviewStatus(message) {
   if (!reviewStatus) return;
   reviewStatus.textContent = message;
   reviewStatus.hidden = !message;
 }
 
+function isReviewInlineListening() {
+  return Boolean(
+    reviewInlineListenController?.isActive() || reviewInlineListenController?.isConnecting(),
+  );
+}
+
+function isSupplementVoiceListening() {
+  return Boolean(
+    supplementRealtimeController?.isActive() || supplementRealtimeController?.isConnecting(),
+  );
+}
+
+function resetReviewInlineCorrectionState() {
+  if (reviewInlineCorrection.debounceTimer) {
+    clearTimeout(reviewInlineCorrection.debounceTimer);
+    reviewInlineCorrection.debounceTimer = null;
+  }
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+  if (reviewInlineCorrection.interruptConfirmTimer) {
+    clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
+    reviewInlineCorrection.interruptConfirmTimer = null;
+  }
+  reviewInlineCorrection.active = false;
+  reviewInlineCorrection.pendingInterrupt = false;
+  reviewInlineCorrection.enteredViaCommand = false;
+  reviewInlineCorrection.segments = [];
+  reviewInlineCorrection.flushedSegmentCount = 0;
+  reviewInlineCorrection.applyInFlight = false;
+  reviewInlineCorrection.finalizeInFlight = false;
+}
+
+function cancelPendingSpeechInterrupt() {
+  if (reviewInlineCorrection.interruptConfirmTimer) {
+    clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
+    reviewInlineCorrection.interruptConfirmTimer = null;
+  }
+  reviewInlineCorrection.pendingInterrupt = false;
+  if (reviewInlineCorrection.active) return;
+
+  if (state.reviewPlayback.suspendForCorrection) {
+    state.reviewPlayback.suspendForCorrection = null;
+    state.reviewPlayback.paused = false;
+    const player = reviewSpeechPlayer;
+    if (player?.isActive?.() && player?.isPaused?.()) {
+      player.resume();
+    }
+    updateReviewUi();
+    updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+  }
+}
+
+function beginInlineCorrection() {
+  if (reviewInlineCorrection.active) return;
+  reviewInlineCorrection.active = true;
+  reviewInlineCorrection.pendingInterrupt = false;
+  if (!state.reviewPlayback.suspendForCorrection) {
+    captureReviewPlaybackForCorrection();
+  }
+  updateReviewStatus("Corrigeren — spreek je aanpassing in…");
+  updateVoiceCorrectUi();
+  void ensureReviewInlineListen();
+}
+
 function updateVoiceCorrectUi() {
-  const rec = state.supplement.recording && state.supplement.autoProcessOnStop;
+  const rec =
+    reviewInlineCorrection.active ||
+    (isSupplementVoiceListening() && !isReviewInlineListening());
   btnVoiceCorrect?.classList.toggle("is-recording", rec);
   btnVoiceCorrect?.setAttribute("aria-pressed", rec ? "true" : "false");
-  if (voiceCorrectLabel) {
-    voiceCorrectLabel.textContent = rec ? "Stoppen & verwerken" : "Mondeling corrigeren";
+  let label = "Mondeling corrigeren";
+  if (rec) {
+    label = "Stoppen & verwerken";
+  } else if (state.reviewPlayback.active && isReviewInlineListening()) {
+    label = 'Zeg "Correctie" of spreek om te corrigeren';
   }
-  const reviewBusy = state.reviewPlayback.active && !state.supplement.recording;
-  btnVoiceCorrect?.toggleAttribute("disabled", reviewBusy);
+  btnVoiceCorrect?.setAttribute("aria-label", label);
+  btnVoiceCorrect?.setAttribute("title", label);
+  const processingBusy = outputPanel?.classList.contains("is-busy");
+  btnVoiceCorrect?.toggleAttribute("disabled", Boolean(processingBusy));
+}
+
+/** @param {VisitReportResult} result */
+function applyReportFieldsFromResult(result) {
+  $("note-title").value = result.megaMinnie.salesforceNote.title;
+  setNoteBodyMarkdown(result.megaMinnie.salesforceNote.body);
+  renderTasksAndEvents(result, state.defaultAccountManager);
+  state.lastResult = result;
+}
+
+async function applyInlineCorrectionToReport(supplementText) {
+  const existing = getExistingMegaMinnieFromUi();
+  if (!existing || !supplementText.trim()) return null;
+
+  const fd = formFields();
+  fd.append("existing", JSON.stringify(existing));
+  fd.append("supplementText", supplementText.trim());
+  const result = await apiPost("/api/visit-report/extend", {
+    method: "POST",
+    body: fd,
+  });
+  applyReportFieldsFromResult({ ...result, transcript: supplementText.trim() });
+  return result;
+}
+
+function scheduleInlineCorrectionApply() {
+  if (reviewInlineCorrection.debounceTimer) {
+    clearTimeout(reviewInlineCorrection.debounceTimer);
+  }
+  reviewInlineCorrection.debounceTimer = setTimeout(() => {
+    reviewInlineCorrection.debounceTimer = null;
+    void flushInlineCorrection({ final: false });
+  }, 450);
+}
+
+async function flushInlineCorrection({ final = false } = {}) {
+  if (reviewInlineCorrection.applyInFlight) {
+    if (final) {
+      reviewInlineCorrection.finalizeInFlight = true;
+    }
+    return;
+  }
+
+  const newParts = reviewInlineCorrection.segments.slice(
+    reviewInlineCorrection.flushedSegmentCount,
+  );
+  const supplementText = newParts.join(" ").trim();
+  if (!supplementText) {
+    if (final && reviewInlineCorrection.finalizeInFlight) {
+      reviewInlineCorrection.finalizeInFlight = false;
+    }
+    return;
+  }
+
+  reviewInlineCorrection.applyInFlight = true;
+  updateReviewStatus("Tekst bijwerken…");
+  try {
+    await applyInlineCorrectionToReport(supplementText);
+    reviewInlineCorrection.flushedSegmentCount = reviewInlineCorrection.segments.length;
+    updateReviewStatus(
+      reviewInlineCorrection.active ? "Spreek verder of wacht…" : "",
+    );
+  } catch (err) {
+    showFeedback(
+      err instanceof Error ? err.message : "Live correctie mislukt",
+      "error",
+    );
+  } finally {
+    reviewInlineCorrection.applyInFlight = false;
+    if (reviewInlineCorrection.finalizeInFlight) {
+      reviewInlineCorrection.finalizeInFlight = false;
+      await flushInlineCorrection({ final: true });
+    }
+  }
+}
+
+function handleReviewCorrectieCommand() {
+  if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
+  if (reviewInlineCorrection.active) return;
+
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+  if (reviewInlineCorrection.interruptConfirmTimer) {
+    clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
+    reviewInlineCorrection.interruptConfirmTimer = null;
+  }
+  reviewInlineCorrection.pendingInterrupt = false;
+
+  if (!state.reviewPlayback.suspendForCorrection) {
+    captureReviewPlaybackForCorrection();
+  } else if (!state.reviewPlayback.paused) {
+    pauseReviewPlayback();
+  }
+
+  reviewInlineCorrection.enteredViaCommand = true;
+  beginInlineCorrection();
+}
+
+function appendInlineCorrectionSegment(text) {
+  const cleaned = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
+  if (!cleaned) return;
+  const last = reviewInlineCorrection.segments[reviewInlineCorrection.segments.length - 1];
+  if (last && last.toLowerCase() === cleaned.toLowerCase()) return;
+  reviewInlineCorrection.segments.push(cleaned);
+  scheduleInlineCorrectionApply();
+}
+
+function maybeHandleReviewVoiceCommand(text) {
+  if (!state.reviewPlayback.active) return false;
+  const cmd = detectReviewVoiceCommand(text);
+  if (cmd === "correctie") {
+    handleReviewCorrectieCommand();
+    appendInlineCorrectionSegment(text);
+    return true;
+  }
+  if (cmd === "voorlezen") {
+    void handleReviewVoorlezenCommand();
+    return true;
+  }
+  return false;
+}
+
+async function handleReviewVoorlezenCommand() {
+  if (!state.reviewPlayback.active) return;
+
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+
+  if (reviewInlineCorrection.active || reviewInlineCorrection.pendingInterrupt) {
+    if (reviewInlineCorrection.pendingInterrupt) {
+      cancelPendingSpeechInterrupt();
+    }
+    await finalizeInlineCorrectionAndResume();
+    return;
+  }
+
+  if (state.reviewPlayback.paused || state.reviewPlayback.suspendForCorrection) {
+    resumeReviewPlaybackInPlace();
+  }
+}
+
+function handleReviewInlineSpeechStarted() {
+  if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
+  if (state.reviewPlayback.ttsActive && !reviewInlineCorrection.active) return;
+
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+
+  if (reviewInlineCorrection.active) return;
+  if (reviewInlineCorrection.pendingInterrupt) return;
+
+  reviewInlineCorrection.pendingInterrupt = true;
+  if (!state.reviewPlayback.suspendForCorrection) {
+    captureReviewPlaybackForCorrection();
+  }
+
+  reviewInlineCorrection.interruptConfirmTimer = setTimeout(() => {
+    reviewInlineCorrection.interruptConfirmTimer = null;
+    reviewInlineCorrection.pendingInterrupt = false;
+    reviewInlineCorrection.enteredViaCommand = false;
+    beginInlineCorrection();
+  }, INLINE_INTERRUPT_CONFIRM_MS);
+}
+
+/** @param {string} text */
+function handleReviewInlineUserTurn(text) {
+  if (maybeHandleReviewVoiceCommand(text)) return;
+
+  if (!reviewInlineCorrection.active) {
+    const cleaned = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
+    if (
+      cleaned &&
+      reviewInlineCorrection.pendingInterrupt &&
+      !state.reviewPlayback.ttsActive
+    ) {
+      if (reviewInlineCorrection.interruptConfirmTimer) {
+        clearTimeout(reviewInlineCorrection.interruptConfirmTimer);
+        reviewInlineCorrection.interruptConfirmTimer = null;
+      }
+      reviewInlineCorrection.pendingInterrupt = false;
+      beginInlineCorrection();
+      appendInlineCorrectionSegment(text);
+    }
+    return;
+  }
+
+  appendInlineCorrectionSegment(text);
+}
+
+function setReviewPlaybackTtsActive(ttsActive) {
+  state.reviewPlayback.ttsActive = ttsActive;
+}
+
+function scheduleInlineCorrectionResume() {
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+  }
+  const delay =
+    reviewInlineCorrection.segments.length > 0 || reviewInlineCorrection.enteredViaCommand
+      ? INLINE_CORRECTION_RESUME_MS
+      : INLINE_CORRECTION_EMPTY_RESUME_MS;
+  reviewInlineCorrection.resumeTimer = setTimeout(() => {
+    reviewInlineCorrection.resumeTimer = null;
+    void finalizeInlineCorrectionAndResume();
+  }, delay);
+}
+
+/** @param {{ pendingUserText?: string }} [ctx] */
+function handleReviewInlineSpeechStopped(ctx = {}) {
+  const pendingText = (ctx.pendingUserText || "").replace(/\s+/g, " ").trim();
+
+  if (reviewInlineCorrection.pendingInterrupt && !reviewInlineCorrection.active) {
+    if (
+      isReviewCorrectieCommand(pendingText) ||
+      startsWithReviewCorrectieCommand(pendingText)
+    ) {
+      handleReviewCorrectieCommand();
+      appendInlineCorrectionSegment(pendingText);
+      return;
+    }
+    cancelPendingSpeechInterrupt();
+    return;
+  }
+
+  if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
+  if (reviewInlineCorrection.debounceTimer) {
+    clearTimeout(reviewInlineCorrection.debounceTimer);
+    reviewInlineCorrection.debounceTimer = null;
+  }
+  void flushInlineCorrection({ final: false });
+  if (reviewInlineCorrection.segments.length === 0 && !reviewInlineCorrection.enteredViaCommand) {
+    void finalizeInlineCorrectionAndResume();
+    return;
+  }
+  updateReviewStatus(
+    reviewInlineCorrection.segments.length === 0
+      ? "Corrigeren — spreek je aanpassing in…"
+      : 'Luistert — spreek verder of zeg "Voorlezen"',
+  );
+  scheduleInlineCorrectionResume();
+}
+
+async function finalizeInlineCorrectionAndResume() {
+  if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
+  reviewInlineCorrection.finalizeInFlight = true;
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+  if (reviewInlineCorrection.debounceTimer) {
+    clearTimeout(reviewInlineCorrection.debounceTimer);
+    reviewInlineCorrection.debounceTimer = null;
+  }
+  await flushInlineCorrection({ final: true });
+
+  if (!state.reviewPlayback.suspendForCorrection) {
+    reviewInlineCorrection.active = false;
+    reviewInlineCorrection.finalizeInFlight = false;
+    updateVoiceCorrectUi();
+    return;
+  }
+
+  reviewInlineCorrection.active = false;
+  reviewInlineCorrection.pendingInterrupt = false;
+  reviewInlineCorrection.enteredViaCommand = false;
+  updateVoiceCorrectUi();
+
+  const resumed = resumeReviewPlaybackInPlace();
+  if (!resumed) {
+    state.reviewPlayback.suppressLoopCleanup = true;
+    abortReviewPlaybackLoop();
+    await resumeReviewPlaybackAfterCorrection();
+  }
+  void ensureReviewInlineListen();
+  reviewInlineCorrection.finalizeInFlight = false;
+  if (state.reviewPlayback.active) {
+    updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+  }
+}
+
+function resumeReviewPlaybackInPlace() {
+  const suspend = state.reviewPlayback.suspendForCorrection;
+  if (!suspend) return false;
+
+  const plan = buildReviewSpeechPlan();
+  if (!plan.chunks.length) return false;
+
+  const newIndex = resolveReviewResumeChunkIndex(
+    suspend,
+    plan.chunkParagraphKeys,
+    plan.chunks.length,
+  );
+  void prefetchOpenAiSpeech(plan.chunks[newIndex]);
+  if (plan.chunks[newIndex + 1]) void prefetchOpenAiSpeech(plan.chunks[newIndex + 1]);
+
+  state.reviewPlayback.suspendForCorrection = null;
+  state.reviewPlayback.chunks = plan.chunks;
+  state.reviewPlayback.chunkParagraphKeys = plan.chunkParagraphKeys;
+  state.reviewPlayback.index = newIndex;
+  state.reviewPlayback.paused = false;
+  state.reviewPlayback.cancelled = false;
+
+  const player = ensureReviewSpeechPlayer();
+  if (!player.isActive()) return false;
+  if (!player.resumeAfterCorrection(plan.chunks, newIndex)) return false;
+
+  updateReviewUi();
+  updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+  return true;
+}
+
+async function startReviewInlineListen() {
+  if (!realtimeInterviewEnabled || !reviewInlineListenController) return;
+  if (isReviewInlineListening()) return;
+  await reviewInlineListenController.start({
+    listenOnly: true,
+    passiveListen: true,
+    correctionDialogue: false,
+  });
+}
+
+async function ensureReviewInlineListen() {
+  if (!state.reviewPlayback.active || !realtimeInterviewEnabled) return;
+  if (isReviewInlineListening()) return;
+  try {
+    await startReviewInlineListen();
+  } catch {
+    /* onError handler retries */
+  }
+}
+
+function stopReviewInlineListen() {
+  reviewInlineListenController?.stop();
+  if (!state.reviewPlayback.active) {
+    resetReviewInlineCorrectionState();
+  }
+}
+
+function captureReviewPlaybackForCorrection() {
+  if (!state.reviewPlayback.active) return;
+  const resumeIndex =
+    reviewSpeechPlayer?.getCurrentIndex?.() ?? state.reviewPlayback.index ?? 0;
+  const paragraphKey = state.reviewPlayback.chunkParagraphKeys[resumeIndex] ?? null;
+  state.reviewPlayback.suspendForCorrection = { resumeIndex, paragraphKey };
+  if (!state.reviewPlayback.paused) {
+    pauseReviewPlayback();
+  }
+}
+
+function abortReviewPlaybackLoop() {
+  state.reviewPlayback.cancelled = true;
+  reviewSpeechPlayer?.stop();
+}
+
+async function resumeReviewPlaybackAfterCorrection() {
+  const suspend = state.reviewPlayback.suspendForCorrection;
+  state.reviewPlayback.suspendForCorrection = null;
+  if (!suspend) return;
+
+  const plan = buildReviewSpeechPlan();
+  if (!plan.chunks.length) {
+    showFeedback("Geen tekst om verder voor te lezen.", "error");
+    return;
+  }
+
+  const startIndex = resolveReviewResumeChunkIndex(
+    suspend,
+    plan.chunkParagraphKeys,
+    plan.chunks.length,
+  );
+  void prefetchOpenAiSpeech(plan.chunks[startIndex]);
+  if (plan.chunks[startIndex + 1]) void prefetchOpenAiSpeech(plan.chunks[startIndex + 1]);
+
+  state.reviewPlayback = {
+    active: true,
+    paused: false,
+    cancelled: false,
+    chunks: plan.chunks,
+    chunkParagraphKeys: plan.chunkParagraphKeys,
+    index: startIndex,
+    suspendForCorrection: null,
+    suppressLoopCleanup: false,
+  };
+  updateReviewUi();
+  updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+
+  if (realtimeInterviewEnabled && !isReviewInlineListening()) {
+    void startReviewInlineListen();
+  }
+
+  try {
+    await ensureReviewSpeechPlayer().playFrom(plan.chunks, startIndex, {
+      onProgress: (index) => {
+        state.reviewPlayback.index = index;
+      },
+    });
+  } catch {
+    /* onError in player */
+  } finally {
+    if (!state.reviewPlayback.suspendForCorrection) {
+      stopReviewInlineListen();
+    }
+    state.reviewPlayback.active = false;
+    state.reviewPlayback.paused = false;
+    updateReviewUi();
+  }
 }
 
 function updateReviewUi() {
@@ -1515,45 +2092,75 @@ function ensureReviewSpeechPlayer() {
     reviewSpeechPlayer = createOpenAiSpeechPlayback({
       onStatus: updateReviewStatus,
       onError: (message) => showFeedback(message, "error"),
+      onTtsActive: (active) => setReviewPlaybackTtsActive(active),
     });
   }
   return reviewSpeechPlayer;
 }
 
 function stopReviewPlayback() {
+  state.reviewPlayback.suspendForCorrection = null;
   state.reviewPlayback.cancelled = true;
   state.reviewPlayback.active = false;
   state.reviewPlayback.paused = false;
   reviewSpeechPlayer?.stop();
+  stopReviewInlineListen();
+  supplementRealtimeController?.stop();
   window.speechSynthesis?.cancel();
   updateReviewUi();
   if (reviewStatus) reviewStatus.hidden = true;
 }
 
-async function startReviewPlayback() {
-  const text = buildReviewSpeechText();
-  if (!text.trim()) {
+async function runReviewPlayback(startIndex = 0) {
+  const plan = buildReviewSpeechPlan();
+  if (!plan.chunks.length) {
     showFeedback("Geen tekst om voor te lezen.", "error");
     return;
   }
-  stopReviewPlayback();
+
+  const safeStart = Math.max(0, Math.min(startIndex, plan.chunks.length - 1));
+  void prefetchOpenAiSpeech(plan.chunks[safeStart]);
+  if (plan.chunks[safeStart + 1]) void prefetchOpenAiSpeech(plan.chunks[safeStart + 1]);
+
   state.reviewPlayback = {
     active: true,
     paused: false,
     cancelled: false,
-    chunks: splitSpeechChunks(text),
-    index: 0,
+    chunks: plan.chunks,
+    chunkParagraphKeys: plan.chunkParagraphKeys,
+    index: safeStart,
+    suspendForCorrection: null,
+    suppressLoopCleanup: false,
   };
   updateReviewUi();
+  updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+
+  if (realtimeInterviewEnabled) {
+    void startReviewInlineListen();
+  }
+
   try {
-    await ensureReviewSpeechPlayer().playAll(state.reviewPlayback.chunks);
+    await ensureReviewSpeechPlayer().playFrom(plan.chunks, safeStart, {
+      onProgress: (index) => {
+        state.reviewPlayback.index = index;
+      },
+    });
   } catch {
     /* onError in player */
   } finally {
+    if (!state.reviewPlayback.suppressLoopCleanup) {
+      stopReviewInlineListen();
+    }
+    state.reviewPlayback.suppressLoopCleanup = false;
     state.reviewPlayback.active = false;
     state.reviewPlayback.paused = false;
     updateReviewUi();
   }
+}
+
+async function startReviewPlayback() {
+  stopReviewPlayback();
+  await runReviewPlayback(0);
 }
 
 function pauseReviewPlayback() {
@@ -2385,10 +2992,10 @@ async function transcribeAllInterviewAnswers() {
         phase: 1,
         transcribing: true,
         progress: from,
-        message: `Transcriberen: antwoord ${i + 1} van ${total}…`,
+        message: `Verwerken: antwoord ${i + 1} van ${total}…`,
       });
       if (interviewStatus) {
-        interviewStatus.textContent = `Transcriberen: antwoord ${i + 1} van ${total}…`;
+        interviewStatus.textContent = `Verwerken: antwoord ${i + 1} van ${total}…`;
       }
       try {
         const transcribed = await runWithProgressTicker(
@@ -2403,7 +3010,7 @@ async function transcribeAllInterviewAnswers() {
           phase: 1,
           transcribing: true,
           progress: to,
-          message: `Transcriberen: antwoord ${i + 1} van ${total}…`,
+          message: `Verwerken: antwoord ${i + 1} van ${total}…`,
         });
         if (transcribed.qualityWarning) {
           qualityWarnings.push(transcribed.qualityWarning);
@@ -2413,8 +3020,8 @@ async function transcribeAllInterviewAnswers() {
       } catch (err) {
         throw new Error(
           err instanceof Error
-            ? `Transcriptie vraag ${i + 1} mislukt: ${err.message}`
-            : `Transcriptie vraag ${i + 1} mislukt`,
+            ? `Verwerken vraag ${i + 1} mislukt: ${err.message}`
+            : `Verwerken vraag ${i + 1} mislukt`,
         );
       }
     }
@@ -2439,7 +3046,7 @@ async function completeInterview() {
   stopInterviewAnswerListening();
 
   await speakAndWait(
-    "Prima. Het interview is afgerond. Ik ga nu alles transcriberen en je verslag uitwerken.",
+    "Prima. Het interview is afgerond. Ik ga nu alles verwerken en je verslag uitwerken.",
     { requireActive: false },
   );
 
@@ -2458,13 +3065,13 @@ async function completeInterview() {
 
   const processId = ++activeProcessId;
   const { requestId, signal } = beginRequest();
-  setInterviewProcessing(true, "Alle antwoorden transcriberen…");
-  setInputBusy(true, "Interview transcriberen…");
+  setInterviewProcessing(true, "Alle antwoorden verwerken…");
+  setInputBusy(true, "Interview verwerken…");
   setProcessingPhase({
     phase: 1,
     transcribing: true,
     progress: 5,
-    message: "Stap 1/2: Interview transcriberen…",
+    message: "Stap 1/2: Interview verwerken…",
   });
   hideFeedback();
 
@@ -2483,13 +3090,13 @@ async function completeInterview() {
       return;
     }
 
-    setInterviewProcessing(true, "MegaMinnie werkt je verslag uit…");
-    setInputBusy(true, "MegaMinnie werkt je verslag uit…");
+    setInterviewProcessing(true, "Uitwerken…");
+    setInputBusy(true, "Uitwerken…");
     setProcessingPhase({
       phase: 2,
       progress: 50,
       transcribing: false,
-      message: "Stap 2/2: MegaMinnie werkt je verslag uit…",
+      message: "Stap 2/2: Uitwerken…",
     });
 
     const result = await runWithProgressTicker(
@@ -2683,6 +3290,7 @@ function updateOutputVisibility() {
   const show = hasUitgewerktResult();
   if (outputPanel) outputPanel.hidden = !show;
   mainLayout?.classList.toggle("layout--single", !show);
+  setTasksEventsToolbarVisible(show);
   if (!show) {
     $("result-area").hidden = true;
     if (reviewSection) reviewSection.hidden = true;
@@ -2767,7 +3375,7 @@ function getExistingMegaMinnieFromUi() {
   return collectTasksEventsFromUi({
     ...base,
     salesforceNote: { title, body },
-  });
+  }, state.defaultAccountManager);
 }
 
 function renderSupplementAttachments() {
@@ -2806,10 +3414,72 @@ function updateSupplementUi() {
   if (!reviewSection) return;
   const show = hasUitgewerktResult();
   if (!show) return;
-
-  const mode = resolveSupplementMode();
-  if (btnSupplementProcess) btnSupplementProcess.disabled = mode !== "photo";
   renderSupplementAttachments();
+}
+
+async function startSupplementVoiceCorrection() {
+  if (!realtimeInterviewEnabled) {
+    showFeedback(
+      "Mondeling corrigeren gebruikt OpenAI Realtime (zelfde als Vraag en Antwoord). Zet REALTIME_INTERVIEW_ENABLED=true.",
+      "error",
+    );
+    return;
+  }
+  if (isRealtimeConversationRunning()) {
+    showFeedback("Stop eerst Vraag en Antwoord voordat je een correctie inspreekt.", "error");
+    return;
+  }
+
+  if (state.reviewPlayback.active && isReviewInlineListening()) {
+    showFeedback("Spreek je correctie in — MegaMinnie luistert mee.", "info");
+    return;
+  }
+
+  if (isSupplementVoiceListening()) return;
+
+  if (state.reviewPlayback.active) {
+    captureReviewPlaybackForCorrection();
+  } else {
+    stopReviewPlayback();
+  }
+
+  stopReviewInlineListen();
+  supplementRealtimeController?.stop();
+  clearSupplement();
+  updateVoiceCorrectUi();
+  await supplementRealtimeController?.start({
+    listenOnly: false,
+    passiveListen: false,
+    correctionDialogue: true,
+  });
+  updateVoiceCorrectUi();
+}
+
+async function finishSupplementVoiceCorrection() {
+  if (!supplementRealtimeController?.isActive() && !supplementRealtimeController?.isConnecting()) {
+    return;
+  }
+
+  const resumeAfter = Boolean(state.reviewPlayback.suspendForCorrection);
+  const text = supplementRealtimeController.getUserTranscript();
+  supplementRealtimeController.stop("Verwerken…");
+  updateVoiceCorrectUi();
+  if (reviewStatus) reviewStatus.hidden = true;
+
+  if (!text.trim()) {
+    showFeedback("Geen correctie verstaan — probeer opnieuw.", "error");
+    if (resumeAfter) {
+      state.reviewPlayback.cancelled = false;
+      if (!resumeReviewPlaybackInPlace()) {
+        state.reviewPlayback.suppressLoopCleanup = true;
+        abortReviewPlaybackLoop();
+        await resumeReviewPlaybackAfterCorrection();
+      }
+    }
+    return;
+  }
+
+  await processSupplement({ supplementText: text, resumeReviewAfter });
 }
 
 function clearResultFields() {
@@ -2823,14 +3493,14 @@ function clearResultFields() {
 
 function clearDraftResult() {
   stopReviewPlayback();
+  supplementRealtimeController?.stop();
   state.lastResult = null;
   clearSupplement();
-  const badge = $("result-source-badge");
-  if (badge) badge.hidden = true;
   clearResultFields();
   updateOutputVisibility();
   $("tasks-section").hidden = true;
   $("events-section").hidden = true;
+  $("tasks-events-actions").hidden = true;
   $("tasks-list").innerHTML = "";
   $("events-list").innerHTML = "";
   if (sfLink) sfLink.hidden = true;
@@ -2860,8 +3530,11 @@ function showManualPanel() {
   manualPanel.hidden = false;
   btnManual?.classList.add("is-active");
   btnManual?.setAttribute("aria-expanded", "true");
+  setActiveInputKind("text");
   placeProcessButton();
+  updateInputChrome();
   textInput?.focus();
+  manualPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function hideManualPanel() {
@@ -2870,6 +3543,7 @@ function hideManualPanel() {
   btnManual?.classList.remove("is-active");
   btnManual?.setAttribute("aria-expanded", "false");
   placeProcessButton();
+  updateInputChrome();
 }
 
 function toggleManualPanel() {
@@ -3159,6 +3833,11 @@ async function loadHealth() {
     state.dryRun = Boolean(data.dryRun);
     state.keepInput = readTestModePreference(Boolean(data.keepInput));
     state.salesforceConfigured = Boolean(data.salesforceConfigured);
+    state.mailSignature = typeof data.mailSignature === "string" ? data.mailSignature : "";
+    state.defaultAccountManager =
+      typeof data.defaultAccountManager === "string" && data.defaultAccountManager.trim()
+        ? data.defaultAccountManager.trim()
+        : "Accountmanager";
     const realtimeEnabled = data.realtimeInterviewEnabled !== false;
     realtimeInterviewEnabled = realtimeEnabled;
     if (btnInvoer) btnInvoer.toggleAttribute("disabled", !realtimeEnabled);
@@ -3290,7 +3969,12 @@ btnPickFiles?.addEventListener("click", (e) => {
 btnManual?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
-  toggleManualPanel();
+  if (isManualPanelOpen()) {
+    hideManualPanel();
+  } else {
+    clearInputExcept("text");
+    showManualPanel();
+  }
   updateProcessUi();
 });
 
@@ -3337,6 +4021,7 @@ btnInvoer?.addEventListener("click", (e) => {
   showInterviewPanel(false);
   realtimeAutoFinishing = false;
   lastRealtimeTranscript = "";
+  supplementRealtimeController?.stop();
   void realtimeController?.start();
   updateProcessUi();
 });
@@ -3392,14 +4077,14 @@ btnInterviewCancel?.addEventListener("click", (e) => {
 
 // --- Supplement (foto + mondelinge correctie) ---
 
-btnSupplementPick?.addEventListener("click", (e) => {
+btnSupplementProcess?.addEventListener("click", (e) => {
   e.preventDefault();
   supplementFile?.click();
 });
 
 supplementFile?.addEventListener("change", () => {
   const files = [...(supplementFile.files ?? [])];
-  if (files.length) void ingestSupplementFiles(files);
+  if (files.length) void ingestSupplementFiles(files, { autoProcess: true });
   supplementFile.value = "";
 });
 
@@ -3410,18 +4095,21 @@ btnSupplementRemoveAudio?.addEventListener("click", (e) => {
   updateSupplementUi();
 });
 
-btnSupplementProcess?.addEventListener("click", () => processSupplement());
-
 btnVoiceCorrect?.addEventListener("click", (e) => {
   e.preventDefault();
-  if (state.supplement.recording && state.supplement.autoProcessOnStop) {
-    stopRecording();
+  if (reviewInlineCorrection.active) {
+    void finalizeInlineCorrectionAndResume();
     return;
   }
-  stopReviewPlayback();
-  state.supplement.autoProcessOnStop = true;
-  recordContext = "supplement";
-  void startRecording();
+  if (isSupplementVoiceListening()) {
+    void finishSupplementVoiceCorrection();
+    return;
+  }
+  if (state.reviewPlayback.active && isReviewInlineListening()) {
+    showFeedback("Spreek je correctie in — MegaMinnie luistert mee.", "info");
+    return;
+  }
+  void startSupplementVoiceCorrection();
 });
 
 btnReviewRead?.addEventListener("click", () => {
@@ -3779,7 +4467,7 @@ function updateFlowSteps() {
   );
   if (step2Label) {
     if (processing && activeProcessingPhase === 1) {
-      step2Label.textContent = "Transcriberen…";
+      step2Label.textContent = "Verwerken…";
     } else if (processing && activeProcessingPhase === 2) {
       step2Label.textContent = "Uitwerken…";
     } else if (processing) {
@@ -4013,7 +4701,7 @@ async function processReport() {
         phase: 1,
         transcribing: true,
         progress: 3,
-        message: "Stap 1/2: Transcriberen van je opname…",
+        message: "Stap 1/2: Verwerken van je opname…",
       });
       const fdTranscribe = formFields();
       fdTranscribe.append("audio", snapshot.audio, snapshot.audioName);
@@ -4036,7 +4724,7 @@ async function processReport() {
         phase: 2,
         progress: 50,
         transcribing: false,
-        message: "Stap 2/2: MegaMinnie werkt je verslag uit…",
+        message: "Stap 2/2: Uitwerken…",
       });
       result = await runWithProgressTicker(
         50,
@@ -4060,7 +4748,7 @@ async function processReport() {
         phase: 1,
         transcribing: false,
         progress: 3,
-        message: "MegaMinnie werkt je tekst uit…",
+        message: "Uitwerken…",
       });
       result = await runWithProgressTicker(
         3,
@@ -4117,8 +4805,8 @@ async function processReport() {
   }
 }
 
-/** @param {File[]} files */
-async function ingestSupplementFiles(files) {
+/** @param {File[]} files @param {{ autoProcess?: boolean }} [opts] */
+async function ingestSupplementFiles(files, opts = {}) {
   const images = files.filter(isImageFile);
   if (images.length) {
     clearSupplementExcept("photo");
@@ -4131,21 +4819,26 @@ async function ingestSupplementFiles(files) {
     }
   } else {
     alert(
-      "Kies een foto om aan te vullen. Voor mondelinge correcties gebruik 'Mondeling corrigeren'.",
+      "Kies een foto om te verwerken. Voor mondelinge correcties gebruik 'Mondeling corrigeren'.",
     );
     return;
   }
   renderSupplementAttachments();
   updateSupplementUi();
+  if (opts.autoProcess) {
+    await processSupplement();
+  }
 }
 
-async function processSupplement() {
+/** @param {{ supplementText?: string; resumeReviewAfter?: boolean }} [opts] */
+async function processSupplement(opts = {}) {
   if (!state.lastResult) {
     alert("Laat MegaMinnie eerst een concept uitwerken.");
     return;
   }
 
-  const mode = resolveSupplementMode();
+  const directText = opts.supplementText?.trim() ?? "";
+  const mode = directText ? "voice" : resolveSupplementMode();
   if (!mode) {
     alert("Voeg een foto toe, of spreek een correctie in via 'Mondeling corrigeren'.");
     return;
@@ -4154,6 +4847,82 @@ async function processSupplement() {
   const existing = getExistingMegaMinnieFromUi();
   if (!existing) {
     alert("Notitietitel en -tekst mogen niet leeg zijn.");
+    return;
+  }
+
+  if (directText) {
+    const processId = ++activeProcessId;
+    const { requestId, signal } = beginRequest();
+    const resumeReviewAfter =
+      opts.resumeReviewAfter === true && Boolean(state.reviewPlayback.suspendForCorrection);
+    if (resumeReviewAfter) {
+      state.reviewPlayback.suppressLoopCleanup = true;
+      abortReviewPlaybackLoop();
+    } else {
+      stopReviewPlayback();
+    }
+    setBusy(true, "Mondeling correctie verwerken…");
+    setProcessingPhase({
+      phase: 2,
+      progress: 50,
+      transcribing: false,
+      message: "Stap 2/2: Uitwerken…",
+    });
+    hideFeedback();
+
+    try {
+      const result = await runWithProgressTicker(
+        50,
+        98,
+        estimateLlmDurationMs(directText.length),
+        () => {
+          const fd = formFields();
+          fd.append("existing", JSON.stringify(existing));
+          fd.append("supplementText", directText);
+          return apiPost("/api/visit-report/extend", {
+            method: "POST",
+            body: fd,
+            signal,
+          });
+        },
+      );
+      applyProgressPct(100);
+
+      if (!isRequestActive(requestId)) return;
+      if (processId !== activeProcessId) return;
+
+      state.lastResult = { ...result, transcript: directText };
+      renderResult(result);
+      clearSupplement();
+      updateSupplementUi();
+      showProcessingSuccessWithQualityWarning(
+        "Concept bijgewerkt met je correctie.",
+        undefined,
+      );
+      if (resumeReviewAfter) {
+        state.reviewPlayback.cancelled = false;
+        if (!resumeReviewPlaybackInPlace()) {
+          await resumeReviewPlaybackAfterCorrection();
+        }
+      }
+    } catch (err) {
+      if (!isRequestActive(requestId)) return;
+      if (isAbortError(err)) return;
+      showProcessingError(
+        err instanceof Error ? err.message : "Bijwerken mislukt",
+      );
+      if (resumeReviewAfter) {
+        state.reviewPlayback.cancelled = false;
+        if (!resumeReviewPlaybackInPlace()) {
+          await resumeReviewPlaybackAfterCorrection();
+        }
+      }
+    } finally {
+      if (isRequestActive(requestId)) {
+        activeAbort = null;
+        setBusy(false);
+      }
+    }
     return;
   }
 
@@ -4194,7 +4963,7 @@ async function processSupplement() {
       phase: 1,
       transcribing: true,
       progress: 3,
-      message: "Stap 1/2: Transcriberen van je correctie…",
+      message: "Stap 1/2: Verwerken van je correctie…",
     });
   } else {
     setProcessingPhase({
@@ -4233,7 +5002,7 @@ async function processSupplement() {
         phase: 2,
         progress: 50,
         transcribing: false,
-        message: "Stap 2/2: Concept bijwerken met je correctie…",
+        message: "Stap 2/2: Uitwerken…",
       });
 
       const fd = formFields();
@@ -4331,6 +5100,7 @@ function isPhotoInputReady() {
 
 function updateInputChrome() {
   inputPanel?.classList.toggle("is-photo-ready", isPhotoInputReady());
+  inputPanel?.classList.toggle("is-manual-open", isManualPanelOpen());
 }
 
 function updateProcessUi() {
@@ -4570,6 +5340,15 @@ function updateSyncButton() {
     Boolean(state.sfSelected?.id) &&
     state.salesforceConfigured;
   btnSync.disabled = !canSync;
+  if (!canSync) {
+    let hint = "Upload naar Salesforce";
+    if (!state.lastResult) hint = "Laat MegaMinnie eerst een verslag uitwerken";
+    else if (!state.salesforceConfigured) hint = "Salesforce is niet geconfigureerd";
+    else if (!state.sfSelected?.id) hint = "Kies eerst een klant in Salesforce";
+    btnSync.title = hint;
+  } else {
+    btnSync.title = "Upload naar Salesforce";
+  }
 }
 
 async function searchSalesforceManual(query) {
@@ -4725,32 +5504,14 @@ function renderResult(result) {
   $("note-title").placeholder = "";
   clearNoteBody();
 
-  const badge = $("result-source-badge");
-  if (badge) {
-    if (result.extended) {
-      badge.textContent =
-        result.source === "voice"
-          ? "Concept bijgewerkt met mondelinge correctie"
-          : "Concept bijgewerkt met extra foto";
-    } else {
-      const labels = {
-        voice: "Uitgewerkt van je opname (transcript)",
-        photo: "Uitgewerkt van je foto",
-        interview: "Uitgewerkt van je interview",
-        conversation: "Uitgewerkt van vrij opgenomen gesprek",
-      };
-      badge.textContent = labels[result.source] ?? "Uitgewerkt";
-    }
-    badge.hidden = false;
-  }
-
   $("note-title").value = result.megaMinnie.salesforceNote.title;
   setNoteBodyMarkdown(result.megaMinnie.salesforceNote.body);
 
   renderSalesforceLink(result);
 
-  renderTasksAndEvents(result);
+  renderTasksAndEvents(result, state.defaultAccountManager);
   updateReviewUi();
+  prefetchReviewSpeech();
 
   const sf = result.salesforce;
   if (sf && !sf.dryRun && sf.noteId) {
@@ -4788,7 +5549,7 @@ async function syncToSalesforce() {
     const megaMinnie = collectTasksEventsFromUi({
       ...state.lastResult.megaMinnie,
       salesforceNote: { title, body },
-    });
+    }, state.defaultAccountManager);
 
     const result = await apiPost("/api/visit-report/sync", {
       method: "POST",
@@ -4870,6 +5631,17 @@ function setBusy(busy, message) {
 
 placeProcessButton();
 initTestModePreference();
+initTasksEventsControls({
+  getDefaultAssignee: () => state.defaultAccountManager,
+  onItemsChanged: () => {
+    if (!state.lastResult?.megaMinnie) return;
+    const megaMinnie = collectTasksEventsFromUi(
+      state.lastResult.megaMinnie,
+      state.defaultAccountManager,
+    );
+    state.lastResult = { ...state.lastResult, megaMinnie };
+  },
+});
 
 const shareReportEmail = initShareReportEmail({
   getReportContext: () => {
@@ -4887,6 +5659,7 @@ const shareReportEmail = initShareReportEmail({
       reportBody,
       contactName: customer?.contactName,
       recipientsInput: customer?.email ?? "",
+      mailSignature: state.mailSignature,
     };
   },
   onFeedback: (message, type) => showFeedback(message, type),
@@ -4953,6 +5726,53 @@ realtimeController = createRealtimeInterviewController({
   onDebugEvent: (message) => {
     // Debug-only; active with ?realtimeDebug=1
     console.debug(message);
+  },
+});
+
+supplementRealtimeController = createRealtimeInterviewController({
+  sessionUrl: "/api/realtime/session/supplement",
+  correctionDialogue: true,
+  setStatus: updateReviewStatus,
+  onStateChange: () => updateVoiceCorrectUi(),
+  onError: (message) => showFeedback(message, "error"),
+});
+
+reviewInlineListenController = createRealtimeInterviewController({
+  sessionUrl: "/api/realtime/session/supplement",
+  listenOnly: true,
+  passiveListen: true,
+  setStatus: updateReviewStatus,
+  onSpeechStarted: () => handleReviewInlineSpeechStarted(),
+  onTurn: (turn) => {
+    if (turn.role === "user") handleReviewInlineUserTurn(turn.text);
+  },
+  onSpeechStopped: (ctx) => {
+    handleReviewInlineSpeechStopped(ctx);
+  },
+  onConnectionLost: () => {
+    if (state.reviewPlayback.active) {
+      updateReviewStatus("Verbinding herstellen…");
+      window.setTimeout(() => void ensureReviewInlineListen(), 500);
+    }
+  },
+  onStateChange: ({ active, connecting }) => {
+    updateVoiceCorrectUi();
+    if (
+      !active &&
+      !connecting &&
+      state.reviewPlayback.active &&
+      !reviewInlineCorrection.finalizeInFlight
+    ) {
+      window.setTimeout(() => void ensureReviewInlineListen(), 400);
+    }
+  },
+  onError: () => {
+    if (state.reviewPlayback.active) {
+      updateReviewStatus("Verbinding herstellen…");
+      window.setTimeout(() => void ensureReviewInlineListen(), 800);
+      return;
+    }
+    showFeedback("Realtime luisteren mislukt.", "error");
   },
 });
 setRealtimeStatus("Niet verbonden");

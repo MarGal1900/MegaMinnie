@@ -1,6 +1,26 @@
 import type { ZodIssue } from "zod";
+import { getDefaultAccountManager } from "./task-assignee-config.js";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const EU_DATE = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/;
+
+function normalizeActivityDate(value: unknown): string {
+  const raw = trimString(value);
+  if (!raw) return "";
+  if (ISO_DATE.test(raw)) return raw;
+  const match = raw.match(EU_DATE);
+  if (!match) return raw;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return raw;
+  const iso = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const check = new Date(`${iso}T12:00:00`);
+  if (check.getFullYear() !== year || check.getMonth() + 1 !== month || check.getDate() !== day) {
+    return raw;
+  }
+  return iso;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -69,13 +89,11 @@ function nextNonEmptyLineIndex(lines: string[], fromIndex: number): number {
 /** Secties: kop op eigen regel, toelichting direct eronder. */
 export function formatNoteBodyInlineHeadings(body: string): string {
   const lines = body.split(/\r?\n/);
-  /** @type {{ header: string; content: string[] }[]} */
-  const sections = [];
-  /** @type {string[]} */
-  let preamble = [];
+  type NoteSection = { header: string; content: string[] };
+  const sections: NoteSection[] = [];
+  let preamble: string[] = [];
   let currentHeader: string | null = null;
-  /** @type {string[]} */
-  let currentContent = [];
+  let currentContent: string[] = [];
 
   const flush = () => {
     if (currentHeader !== null) {
@@ -191,14 +209,18 @@ export function normalizeMegaMinnieJson(raw: unknown): unknown {
       const task = asRecord(item);
       if (!task) return null;
       const subject = trimString(task.subject);
-      const activityDate = trimString(task.activityDate);
+      const activityDate = normalizeActivityDate(task.activityDate);
       if (!subject || !ISO_DATE.test(activityDate)) return null;
+      const assignee = trimString(task.assignee) || getDefaultAccountManager();
+      const ownerId = trimString(task.ownerId) || undefined;
       return {
         subject,
         description: trimString(task.description) || undefined,
         activityDate,
         priority: task.priority ?? "Normal",
         status: task.status ?? "Not Started",
+        assignee,
+        ...(ownerId ? { ownerId } : {}),
       };
     })
     .filter(Boolean);
@@ -262,6 +284,7 @@ export function formatMegaMinnieValidationError(issues: ZodIssue[]): string {
     events: "agenda",
     subject: "onderwerp",
     activityDate: "datum",
+    assignee: "verantwoordelijke",
     startDateTime: "start",
     endDateTime: "einde",
   };

@@ -16,6 +16,10 @@ export const MegaMinnieOutputSchema = z.object({
         activityDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         priority: z.enum(["High", "Normal", "Low"]).default("Normal"),
         status: z.enum(["Not Started", "In Progress", "Completed"]).default("Not Started"),
+        /** Naam verantwoordelijke; standaard accountmanager */
+        assignee: z.string().min(1).optional(),
+        /** Salesforce User Id (optioneel, voor latere koppeling) */
+        ownerId: z.string().min(1).optional(),
       }),
     )
     .default([]),

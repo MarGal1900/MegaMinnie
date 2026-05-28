@@ -381,7 +381,7 @@ async function transcribeSegments(segments, signal) {
     fd.append("audio", blob, name);
 
     deps.setStatus(
-      `Deel ${uploadIndex}/${allChunks.length} transcriberen…`,
+      `Deel ${uploadIndex}/${allChunks.length} verwerken…`,
       "transcribe",
     );
 
@@ -416,7 +416,7 @@ async function processConversationSegments(segments) {
     phase: 1,
     transcribing: true,
     progress: 3,
-    message: "Transcriberen met sprekerherkenning…",
+    message: "Verwerken met sprekerherkenning…",
   });
 
   try {
@@ -433,9 +433,9 @@ async function processConversationSegments(segments) {
       phase: 2,
       transcribing: false,
       progress: 52,
-      message: "MegaMinnie vat het gesprek samen…",
+      message: "Stap 2/2: Uitwerken…",
     });
-    deps.setStatus("Samenvatten met Claude…", "summarize");
+    deps.setStatus("Uitwerken…", "summarize");
 
     const result = await deps.runWithProgressTicker(
       52,

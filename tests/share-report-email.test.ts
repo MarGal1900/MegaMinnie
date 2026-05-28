@@ -203,10 +203,33 @@ describe("buildGespreksverslagMailSubject", () => {
 
 describe("buildGespreksverslagMailBody", () => {
   it("bevat korte begeleidende tekst zonder verslag", () => {
-    const body = buildGespreksverslagMailBody();
-    expect(body).toContain("Beste,");
-    expect(body).toContain("handmatig toe als bijlage");
+    const body = buildGespreksverslagMailBody({
+      contactName: "Jan Jansen",
+      meetingDate: new Date("2026-05-28T12:00:00"),
+    });
+    expect(body).toContain("Beste Jan Jansen,");
+    expect(body).toContain("prettige gesprek van 28 mei 2026");
+    expect(body).toContain("uitgewerkte gespreksverslag");
+    expect(body).toContain("aanvullingen, opmerkingen of correcties");
     expect(body).not.toContain("**");
+    expect(body).not.toContain("handmatig toe als bijlage");
+  });
+
+  it("gebruikt algemene aanhef zonder contactnaam", () => {
+    const body = buildGespreksverslagMailBody({
+      meetingDate: "15 april 2026",
+    });
+    expect(body.startsWith("Beste,")).toBe(true);
+    expect(body).toContain("prettige gesprek van 15 april 2026");
+  });
+
+  it("voegt standaard handtekening toe na afsluiting", () => {
+    const body = buildGespreksverslagMailBody({
+      meetingDate: "28 mei 2026",
+      signature: "Marc van Galen\nCCS\nmarc@example.com",
+    });
+    expect(body).toContain("Met vriendelijke groet,");
+    expect(body).toContain("Marc van Galen\nCCS\nmarc@example.com");
   });
 });
 

@@ -1,6 +1,6 @@
 import { buildGespreksverslagDocxBlob } from "./gespreksverslag-docx.bundle.js";
 
-/** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string }} ShareReportContext */
+/** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string; mailSignature?: string }} ShareReportContext */
 /** @typedef {"desktop" | "mobile"} OutlookComposeTarget */
 
 /** Outlook-app op iOS/Android (ms-outlook://emails/new?to=…). */
@@ -179,18 +179,34 @@ export function buildGespreksverslagMailSubject(meetingSubject) {
 }
 
 /**
+ * @param {{ contactName?: string; meetingDate?: Date | string; signature?: string }} [input]
  * @returns {string}
  */
-export function buildGespreksverslagMailBody() {
-  return [
-    "Beste,",
+export function buildGespreksverslagMailBody(input = {}) {
+  const greeting = input.contactName?.trim()
+    ? `Beste ${input.contactName.trim()},`
+    : "Beste,";
+  const dateStr =
+    typeof input.meetingDate === "string"
+      ? input.meetingDate
+      : formatMeetingDateNl(input.meetingDate ?? new Date());
+
+  const lines = [
+    greeting,
     "",
-    "Bijgaand ontvang je het gespreksverslag.",
+    `Hartelijk dank voor het prettige gesprek van ${dateStr}. Zoals afgesproken vind je in de bijlage het uitgewerkte gespreksverslag.`,
     "",
-    "Let op: het verslag is zojuist gedownload. Voeg dit bestand handmatig toe als bijlage.",
+    "Zou je het verslag willen controleren? Mocht je nog aanvullingen, opmerkingen of correcties hebben, dan hoor ik het graag. Dan weten we zeker dat we het complete beeld hebben voor de eventuele vervolgstappen.",
     "",
     "Met vriendelijke groet,",
-  ].join("\n");
+  ];
+
+  const signature = input.signature?.trim();
+  if (signature) {
+    lines.push("", signature);
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -347,7 +363,14 @@ export function prepareShareReportEmail(options) {
 
   const target = options.composeTarget ?? detectOutlookComposeTarget();
   const subject = buildGespreksverslagMailSubject(options.meetingSubject);
-  const body = buildGespreksverslagMailBody();
+  const meetingDate =
+    options.meetingDate ??
+    extractMeetingDateFromReport(options.meetingSubject, reportBody);
+  const body = buildGespreksverslagMailBody({
+    contactName: options.contactName,
+    meetingDate,
+    signature: options.mailSignature,
+  });
   const composeUrl = buildOutlookComposeUrl(recipients, subject, body, target);
   const lengthError = getOutlookComposeLengthError(target, composeUrl.length);
 
@@ -427,6 +450,7 @@ export function syncShareEmailLink(anchor, ctx) {
     reportBody: ctx.reportBody,
     meetingDate: ctx.meetingDate,
     contactName: ctx.contactName,
+    mailSignature: ctx.mailSignature,
   });
 
   if (!result.ok) {
@@ -490,6 +514,7 @@ export function initShareReportEmail(deps) {
         reportBody: ctx.reportBody,
         meetingDate: ctx.meetingDate,
         contactName: ctx.contactName,
+        mailSignature: ctx.mailSignature,
       });
 
       if (!result.ok) {

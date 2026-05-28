@@ -4,13 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MegaMinnie — Bezoekverslagen</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0e639c" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/css/styles.css?v=78" />
+    <link rel="stylesheet" href="/css/styles.css?v=83" />
   </head>
   <body>
     <div class="app">
@@ -225,6 +227,18 @@
             </button>
           </div>
 
+          <div id="manual-panel" class="manual-panel" hidden>
+            <label class="field">
+              <span class="field__label">Notitie</span>
+              <textarea
+                id="text-input"
+                rows="8"
+                placeholder="Typ of plak je bezoeknotities…"
+              ></textarea>
+            </label>
+            <div id="manual-process-slot" class="process-area"></div>
+          </div>
+
           <div id="test-recordings" class="test-recordings" hidden aria-label="Opgeslagen testbestanden">
             <ul id="test-recordings-list" class="test-recordings__list"></ul>
           </div>
@@ -275,82 +289,119 @@
           </div>
 
           <p id="input-feedback" class="feedback input-feedback" role="status" hidden></p>
-
-          <div id="manual-panel" class="manual-panel" hidden>
-            <label class="field">
-              <span class="field__label">Notitie</span>
-              <textarea
-                id="text-input"
-                rows="8"
-                placeholder="Typ of plak je bezoeknotities…"
-              ></textarea>
-            </label>
-            <div id="manual-process-slot" class="process-area"></div>
-          </div>
         </section>
 
         <section
           class="panel panel--output"
           id="output-panel"
-          aria-labelledby="output-heading"
+          aria-label="Uitwerking"
           hidden
         >
-          <h2 id="output-heading" class="panel__heading">Controle</h2>
-          <p id="result-source-badge" class="result-source-badge" hidden></p>
-
           <div id="result-area" class="result-area">
             <label class="field">
               <span class="field__label">Notitietitel</span>
               <input type="text" id="note-title" />
             </label>
 
-            <label class="field">
-              <span class="field__label">Concept-uitwerking</span>
+            <div class="field">
               <div
                 id="note-body"
                 class="note-body"
                 contenteditable="true"
                 role="textbox"
                 aria-multiline="true"
+                aria-label="Uitwerking"
                 spellcheck="true"
               ></div>
-            </label>
+            </div>
 
             <section id="review-section" class="draft-toolbar" hidden>
               <div class="draft-toolbar__bar">
                 <div class="draft-toolbar__group" role="group" aria-label="Beluister en corrigeer">
-                  <button type="button" id="btn-review-read" class="btn btn--secondary btn--compact">
-                    Voorlezen
+                  <button
+                    type="button"
+                    id="btn-review-read"
+                    class="btn btn--secondary btn--icon"
+                    aria-label="Voorlezen"
+                    title="Voorlezen"
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M2.5 5.5h2.5L7.5 3v10L5 10.5H2.5V5.5z" />
+                      <path
+                        class="icon-stroke"
+                        d="M9.2 5.4a3.3 3.3 0 0 1 0 5.2M11 3.6a6 6 0 0 1 0 8.8"
+                      />
+                    </svg>
                   </button>
-                  <button type="button" id="btn-review-pause" class="btn btn--ghost btn--compact" hidden>
-                    Pauzeren
+                  <button
+                    type="button"
+                    id="btn-review-pause"
+                    class="btn btn--ghost btn--icon"
+                    aria-label="Pauzeren"
+                    title="Pauzeren"
+                    hidden
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M4.5 3.5h2.5v9H4.5v-9zm4.5 0h2.5v9H9v-9z" />
+                    </svg>
                   </button>
-                  <button type="button" id="btn-review-resume" class="btn btn--ghost btn--compact" hidden>
-                    Hervatten
+                  <button
+                    type="button"
+                    id="btn-review-resume"
+                    class="btn btn--ghost btn--icon"
+                    aria-label="Hervatten"
+                    title="Hervatten"
+                    hidden
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M4.5 3.2c0-.7.8-1.1 1.4-.7l7.2 4.3c.6.4.6 1.1 0 1.5l-7.2 4.3c-.6.4-1.4 0-1.4-.7V3.2z" />
+                    </svg>
                   </button>
-                  <button type="button" id="btn-review-stop" class="btn btn--ghost btn--compact" hidden>
-                    Stoppen
+                  <button
+                    type="button"
+                    id="btn-review-stop"
+                    class="btn btn--ghost btn--icon"
+                    aria-label="Stoppen"
+                    title="Stoppen"
+                    hidden
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M4.5 4.5h7v7h-7v-7z" />
+                    </svg>
                   </button>
                   <button
                     type="button"
                     id="btn-voice-correct"
-                    class="btn btn--record btn--record-compact"
+                    class="btn btn--record btn--icon"
                     aria-pressed="false"
+                    aria-label="Mondeling corrigeren"
+                    title="Mondeling corrigeren"
                   >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        class="icon-stroke"
+                        d="M8 2.2a2.2 2.2 0 0 1 2.2 2.2v3.1a2.2 2.2 0 0 1-4.4 0V4.4A2.2 2.2 0 0 1 8 2.2z"
+                      />
+                      <path d="M4.8 7.8v.6a3.2 3.2 0 0 0 6.4 0v-.6H4.8zM8 12.8v1.5" class="icon-stroke" />
+                    </svg>
                     <span class="btn__dot" aria-hidden="true"></span>
-                    <span id="voice-correct-label">Mondeling corrigeren</span>
                   </button>
-                  <button type="button" id="btn-clear-draft" class="btn btn--ghost btn--compact">
-                    Verwijderen
+                  <button
+                    type="button"
+                    id="btn-clear-draft"
+                    class="btn btn--ghost btn--icon btn--icon-danger"
+                    aria-label="Verwijderen"
+                    title="Verwijderen"
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M5.5 2.5h5l.5 1h3v1.5h-12V3.5h3l.5-1zm-.5 3h1v7.5h1.5V5.5H9v7.5h1.5V5.5h1v7.5c0 .8-.7 1.5-1.5 1.5h-4c-.8 0-1.5-.7-1.5-1.5V5.5z" />
+                    </svg>
                   </button>
                 </div>
 
                 <span class="draft-toolbar__sep" aria-hidden="true"></span>
 
-                <div class="draft-toolbar__group" role="group" aria-label="Aanvullen met foto">
-                  <button type="button" id="btn-supplement-pick" class="btn btn--ghost btn--compact">
-                    Foto toevoegen
-                  </button>
+                <div class="draft-toolbar__group" role="group" aria-label="Foto verwerken">
                   <input
                     type="file"
                     id="supplement-file"
@@ -360,10 +411,18 @@
                   <button
                     type="button"
                     id="btn-supplement-process"
-                    class="btn btn--secondary btn--compact"
-                    disabled
+                    class="btn btn--secondary btn--icon"
+                    aria-label="Foto verwerken"
+                    title="Foto verwerken"
                   >
-                    Foto verwerken
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        class="icon-stroke"
+                        d="M2.5 4.5h11v7H2.5v-7zm1.5 0 1.5-1.5h4l1.5 1.5"
+                      />
+                      <circle class="icon-stroke" cx="6" cy="7" r="1.2" />
+                      <path class="icon-stroke" d="M2.5 10.5l2.5-2 2 1.5 2.5-2.5 3 3" />
+                    </svg>
                   </button>
                 </div>
               </div>
@@ -397,14 +456,21 @@
               </a>
             </section>
 
-            <div id="tasks-section" class="subsection" hidden>
-              <h3 class="subsection__title">Taken</h3>
+            <div id="tasks-section" class="subsection subsection--tasks" hidden>
               <ul id="tasks-list" class="card-list"></ul>
             </div>
 
-            <div id="events-section" class="subsection" hidden>
-              <h3 class="subsection__title">Agenda</h3>
+            <div id="events-section" class="subsection subsection--events" hidden>
               <ul id="events-list" class="card-list"></ul>
+            </div>
+
+            <div id="tasks-events-actions" class="tasks-events-actions" hidden>
+              <button type="button" id="btn-add-task" class="btn btn--primary btn--block">
+                Taak toevoegen
+              </button>
+              <button type="button" id="btn-add-event" class="btn btn--primary btn--block">
+                Agenda toevoegen
+              </button>
             </div>
 
             <section id="sf-link" class="sf-panel" hidden>
@@ -471,6 +537,20 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=117"></script>
+    <script type="module" src="/js/app.js?v=143"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("/sw.js")
+            .then((registration) => {
+              console.log("Service worker geregistreerd:", registration.scope);
+            })
+            .catch((error) => {
+              console.log("Service worker registratie mislukt:", error);
+            });
+        });
+      }
+    </script>
   </body>
 </html>

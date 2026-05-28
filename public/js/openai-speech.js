@@ -12,10 +12,46 @@ export async function fetchOpenAiSpeechBlob(text) {
   return apiPostBlob("/api/realtime/speech", { text });
 }
 
+/** @type {Map<string, { blob?: Blob; promise?: Promise<Blob> }>} */
+const speechBlobCache = new Map();
+
+/**
+ * @param {string} text
+ * @returns {Promise<Blob>}
+ */
+export function prefetchOpenAiSpeech(text) {
+  const key = text.replace(/\s+/g, " ").trim();
+  if (!key) return Promise.reject(new Error("Lege tekst."));
+  const cached = speechBlobCache.get(key);
+  if (cached?.blob) return Promise.resolve(cached.blob);
+  if (cached?.promise) return cached.promise;
+
+  const promise = fetchOpenAiSpeechBlob(key)
+    .then((blob) => {
+      speechBlobCache.set(key, { blob });
+      return blob;
+    })
+    .catch((err) => {
+      speechBlobCache.delete(key);
+      throw err;
+    });
+  speechBlobCache.set(key, { promise });
+  return promise;
+}
+
+/**
+ * @param {string} text
+ * @returns {Promise<Blob>}
+ */
+async function loadSpeechBlob(text) {
+  return prefetchOpenAiSpeech(text);
+}
+
 /**
  * @typedef {{
  *   onStatus?: (message: string) => void;
  *   onError?: (message: string) => void;
+ *   onTtsActive?: (active: boolean) => void;
  * }} OpenAiSpeechPlaybackOptions
  */
 
@@ -33,6 +69,9 @@ export function createOpenAiSpeechPlayback(options = {}) {
   /** @type {string[]} */
   let chunks = [];
   let index = 0;
+  /** @type {(() => void) | null} */
+  let playOneResolve = null;
+  let skipNextIndexAdvance = false;
 
   const setStatus = (message) => options.onStatus?.(message);
 
@@ -52,14 +91,28 @@ export function createOpenAiSpeechPlayback(options = {}) {
     }
   };
 
-  const stop = () => {
+  const stopPlayback = () => {
     cancelled = true;
     active = false;
     paused = false;
+    setTtsActive(false);
     cleanupAudio();
     chunks = [];
     index = 0;
   };
+
+  const waitWhilePaused = async () => {
+    while (paused && active && !cancelled) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  const prefetchAhead = (fromIndex) => {
+    if (chunks[fromIndex]) void prefetchOpenAiSpeech(chunks[fromIndex]);
+    if (chunks[fromIndex + 1]) void prefetchOpenAiSpeech(chunks[fromIndex + 1]);
+  };
+
+  const setTtsActive = (active) => options.onTtsActive?.(active);
 
   /**
    * @param {string} text
@@ -73,9 +126,14 @@ export function createOpenAiSpeechPlayback(options = {}) {
         return;
       }
 
-      fetchOpenAiSpeechBlob(text)
+      playOneResolve = resolve;
+      setTtsActive(true);
+
+      loadSpeechBlob(text)
         .then((blob) => {
           if (cancelled) {
+            playOneResolve = null;
+            setTtsActive(false);
             resolve();
             return;
           }
@@ -83,19 +141,113 @@ export function createOpenAiSpeechPlayback(options = {}) {
           audio = new Audio(blobUrl);
           audio.onended = () => {
             cleanupAudio();
+            playOneResolve = null;
+            setTtsActive(false);
             resolve();
           };
           audio.onerror = () => {
             cleanupAudio();
+            playOneResolve = null;
+            setTtsActive(false);
             reject(new Error("Kon audio niet afspelen."));
           };
           void audio.play().catch((err) => {
             cleanupAudio();
+            playOneResolve = null;
+            setTtsActive(false);
             reject(err instanceof Error ? err : new Error(String(err)));
           });
         })
-        .catch(reject);
+        .catch((err) => {
+          playOneResolve = null;
+          setTtsActive(false);
+          reject(err);
+        });
     });
+
+  /**
+   * @param {string[]} newChunks
+   * @param {number} newIndex
+   */
+  function syncChunks(newChunks, newIndex) {
+    chunks = newChunks.filter((c) => c.trim());
+    index = Math.max(0, Math.min(newIndex, Math.max(0, chunks.length - 1)));
+    prefetchAhead(index);
+  }
+
+  /**
+   * Hervat na inline correctie zonder de afspeel-lus te beëindigen.
+   * @param {string[]} newChunks
+   * @param {number} newIndex
+   */
+  function resumeAfterCorrection(newChunks, newIndex) {
+    if (!active) return false;
+    cancelled = false;
+    syncChunks(newChunks, newIndex);
+    cleanupAudio();
+    setTtsActive(false);
+    if (playOneResolve) {
+      const done = playOneResolve;
+      playOneResolve = null;
+      skipNextIndexAdvance = true;
+      done();
+    }
+    paused = false;
+    setStatus(`Voorlezen… (${index + 1}/${chunks.length})`);
+    return true;
+  }
+
+  /**
+   * @param {string[]} textChunks
+   * @param {number} [startIndex]
+   * @param {{
+   *   onProgress?: (index: number) => void;
+   * }} [hooks]
+   */
+  async function playFrom(textChunks, startIndex = 0, hooks = {}) {
+    stopPlayback();
+    chunks = textChunks.filter((c) => c.trim());
+    if (!chunks.length) {
+      throw new Error("Geen tekst om voor te lezen.");
+    }
+
+    index = Math.max(0, Math.min(startIndex, chunks.length - 1));
+    active = true;
+    cancelled = false;
+    paused = false;
+    prefetchAhead(index);
+
+    try {
+      while (active && !cancelled && index < chunks.length) {
+        await waitWhilePaused();
+        if (cancelled) break;
+
+        hooks.onProgress?.(index);
+        setStatus(`Voorlezen… (${index + 1}/${chunks.length})`);
+        prefetchAhead(index + 1);
+        const chunkIndex = index;
+        await playOne(chunks[index]);
+        if (cancelled) break;
+        if (skipNextIndexAdvance) {
+          skipNextIndexAdvance = false;
+        } else if (index === chunkIndex) {
+          index++;
+        }
+      }
+
+      if (!cancelled && index >= chunks.length) {
+        setStatus("Voorlezen klaar.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Voorlezen mislukt.";
+      options.onError?.(message);
+      throw err;
+    } finally {
+      active = false;
+      paused = false;
+      cleanupAudio();
+    }
+  }
 
   return {
     isActive: () => active,
@@ -105,60 +257,37 @@ export function createOpenAiSpeechPlayback(options = {}) {
       if (!active || paused) return;
       paused = true;
       audio?.pause();
+      setTtsActive(false);
       setStatus("Gepauzeerd.");
     },
 
     resume() {
       if (!active || !paused) return;
       paused = false;
-      void audio?.play();
+      if (audio) {
+        setTtsActive(true);
+        void audio.play();
+      }
+      setStatus(`Voorlezen… (${index + 1}/${chunks.length})`);
     },
 
     stop() {
-      stop();
+      stopPlayback();
       setStatus("");
     },
+
+    getCurrentIndex: () => index,
+
+    syncChunks,
+    resumeAfterCorrection,
+
+    playFrom,
 
     /**
      * @param {string[]} textChunks
      */
     async playAll(textChunks) {
-      stop();
-      chunks = textChunks.filter((c) => c.trim());
-      if (!chunks.length) {
-        throw new Error("Geen tekst om voor te lezen.");
-      }
-
-      active = true;
-      cancelled = false;
-      paused = false;
-      index = 0;
-
-      try {
-        while (active && !cancelled && index < chunks.length) {
-          if (paused) {
-            await new Promise((r) => setTimeout(r, 200));
-            continue;
-          }
-          setStatus(`Voorlezen… (${index + 1}/${chunks.length})`);
-          await playOne(chunks[index]);
-          if (cancelled) break;
-          index++;
-        }
-
-        if (!cancelled && index >= chunks.length) {
-          setStatus("Voorlezen klaar.");
-        }
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Voorlezen mislukt.";
-        options.onError?.(message);
-        throw err;
-      } finally {
-        active = false;
-        paused = false;
-        cleanupAudio();
-      }
+      await playFrom(textChunks, 0);
     },
   };
 }
