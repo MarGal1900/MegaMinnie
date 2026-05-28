@@ -1,0 +1,21 @@
+# Lokaal faster-whisper voor MegaMinnie (OpenAI-compatibel)
+# Start: npm run whisper:up
+# API:  http://127.0.0.1:8000/v1  →  WHISPER_BASE_URL in .env
+
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: megaminnie-whisper
+    ports:
+      - "8000:8000"
+    environment:
+      LOG_LEVEL: info
+      ENABLE_UI: "true"
+      # Nederlands + goede kwaliteit op CPU; wijzig naar large-v3 als je meer VRAM/RAM hebt
+      PRELOAD_MODELS: '["Systran/faster-whisper-medium"]'
+    volumes:
+      - speaches-hf-cache:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+
+volumes:
+  speaches-hf-cache:

@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MegaMinnie — Bezoekverslagen</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/styles.css?v=77" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="header__brand">
+          <span class="header__avatar-wrap">
+            <img
+              class="header__avatar"
+              src="/images/megaminnie-profile.png?v=7"
+              alt="MegaMinnie"
+              width="92"
+              height="100"
+            />
+          </span>
+          <div>
+            <h1 class="header__title">MegaMinnie</h1>
+            <p class="header__tagline">Bezoekverslag → Salesforce</p>
+          </div>
+        </div>
+        <div class="header__status">
+          <button
+            type="button"
+            id="btn-test-mode"
+            class="btn btn--test-mode"
+            aria-pressed="false"
+            title="Testmodus: opnames bewaren voor hergebruik"
+          >
+            Testmodus
+          </button>
+          <span id="status-badge" class="badge badge--muted">Laden…</span>
+        </div>
+      </header>
+
+      <div id="test-mode-banner" class="test-mode-banner" hidden role="status">
+        Testmodus
+      </div>
+
+      <nav
+        class="workflow-timeline"
+        id="flow-steps"
+        aria-label="Voortgang in MegaMinnie"
+        style="--progress: 0%"
+      >
+        <ol class="workflow-timeline__list">
+          <li class="workflow-timeline__step" data-step="1">
+            <div class="workflow-timeline__marker">
+              <svg class="workflow-timeline__check" viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M6.2 11.2 3.4 8.4l-.9.9 3.7 3.7 7.8-7.8-.9-.9-6.9 6.9z"
+                />
+              </svg>
+              <span class="workflow-timeline__index">1</span>
+            </div>
+            <p class="workflow-timeline__label">Invoer toevoegen</p>
+          </li>
+          <li class="workflow-timeline__step" data-step="2">
+            <div class="workflow-timeline__marker">
+              <svg class="workflow-timeline__check" viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M6.2 11.2 3.4 8.4l-.9.9 3.7 3.7 7.8-7.8-.9-.9-6.9 6.9z"
+                />
+              </svg>
+              <span class="workflow-timeline__index">2</span>
+            </div>
+            <p class="workflow-timeline__label">Laat MegaMinnie uitwerken</p>
+          </li>
+          <li class="workflow-timeline__step" data-step="3">
+            <div class="workflow-timeline__marker">
+              <svg class="workflow-timeline__check" viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M6.2 11.2 3.4 8.4l-.9.9 3.7 3.7 7.8-7.8-.9-.9-6.9 6.9z"
+                />
+              </svg>
+              <span class="workflow-timeline__index">3</span>
+            </div>
+            <p class="workflow-timeline__label">Controle</p>
+          </li>
+          <li class="workflow-timeline__step" data-step="4">
+            <div class="workflow-timeline__marker">
+              <svg class="workflow-timeline__check" viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M6.2 11.2 3.4 8.4l-.9.9 3.7 3.7 7.8-7.8-.9-.9-6.9 6.9z"
+                />
+              </svg>
+              <span class="workflow-timeline__index">4</span>
+            </div>
+            <p class="workflow-timeline__label">Upload naar Salesforce</p>
+          </li>
+        </ol>
+      </nav>
+
+      <main class="layout layout--single" id="main-layout">
+        <section class="panel panel--input" aria-label="Invoer">
+          <div id="drop-overlay" class="drop-overlay" hidden aria-hidden="true">
+            <span class="drop-overlay__text" id="drop-overlay-text">Sleep bestanden hier</span>
+          </div>
+
+          <div id="input-summary" class="input-summary" hidden aria-live="polite"></div>
+
+          <div class="input-hub">
+            <div id="input-busy" class="input-busy" hidden aria-live="polite">
+              <div class="spinner input-busy__spinner" aria-hidden="true"></div>
+              <div id="input-busy-steps" class="processing-steps" hidden>
+                <span class="processing-steps__item" data-step="1">
+                  <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                  <span class="processing-steps__item-label">Verwerken</span>
+                </span>
+                <span class="processing-steps__item" data-step="2" hidden>
+                  <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                  <span class="processing-steps__item-label">Uitwerken</span>
+                </span>
+              </div>
+              <p id="input-busy-text">Bezig…</p>
+              <button
+                type="button"
+                id="btn-cancel-process"
+                class="btn btn--ghost btn--cancel"
+                hidden
+              >
+                Stoppen
+              </button>
+            </div>
+            <label class="input-hub__drop" id="file-dropzone">
+              <input
+                type="file"
+                id="file-input"
+                multiple
+                accept="image/*,audio/*,.txt,.md,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                hidden
+              />
+              <div id="input-drop-idle" class="input-hub__drop-idle">
+                <span class="input-hub__icon" aria-hidden="true">📎</span>
+                <span class="input-hub__title">Sleep bestanden hier</span>
+                <span class="input-hub__sub">Foto's, audio, Word, PDF of tekst · meerdere foto's mogelijk</span>
+              </div>
+              <div id="input-drop-busy" class="input-hub__drop-busy" hidden aria-live="polite">
+                <div class="mini-megaminnie" aria-hidden="true">
+                  <div class="mini-megaminnie__scene">
+                    <img
+                      id="mini-megaminnie-gif"
+                      class="mini-megaminnie__character"
+                      src="/images/megaminnie-animated-web.gif?v=4"
+                      alt=""
+                      width="395"
+                      height="247"
+                      decoding="async"
+                    />
+                  </div>
+                </div>
+                <p id="input-drop-busy-label" class="input-hub__drop-busy-label">Bezig…</p>
+                <div id="input-drop-busy-steps" class="processing-steps processing-steps--drop" hidden>
+                  <span class="processing-steps__item" data-step="1">
+                    <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                    <span class="processing-steps__item-label">Verwerken</span>
+                  </span>
+                  <span class="processing-steps__item" data-step="2" hidden>
+                    <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                    <span class="processing-steps__item-label">Uitwerken</span>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  id="btn-cancel-drop"
+                  class="btn btn--ghost btn--cancel input-hub__drop-cancel"
+                  hidden
+                >
+                  Stoppen
+                </button>
+              </div>
+            </label>
+
+            <p id="record-hint" class="input-hub__hint" hidden></p>
+
+            <div id="input-attachments" class="input-attachments" hidden></div>
+          </div>
+
+          <div class="input-hub__actions">
+            <button type="button" id="btn-pick-files" class="btn btn--ghost">
+              Bestanden kiezen
+            </button>
+            <div class="input-hub__record-modes" role="group" aria-label="Opnamemodus">
+              <button
+                type="button"
+                id="btn-invoer"
+                class="btn btn--secondary btn--mode"
+                aria-pressed="false"
+              >
+                Vraag &amp; Antwoord
+              </button>
+              <button
+                type="button"
+                id="btn-conversation"
+                class="btn btn--record btn--record-compact btn--mode"
+                aria-pressed="false"
+              >
+                <span class="btn__dot" aria-hidden="true"></span>
+                <span id="conversation-label">Opname gesprek</span>
+              </button>
+            </div>
+            <button type="button" id="btn-manual" class="btn btn--ghost" aria-expanded="false">
+              Handmatige invoer
+            </button>
+          </div>
+
+          <div id="test-recordings" class="test-recordings" hidden aria-label="Opgeslagen testbestanden">
+            <ul id="test-recordings-list" class="test-recordings__list"></ul>
+          </div>
+
+          <div id="conversation-panel" class="conversation" hidden aria-live="polite">
+            <p class="conversation__intro">
+              Vrij gesprek opnemen — accountmanager én klant. MegaMinnie luistert mee zonder te interrumperen.
+            </p>
+            <div class="conversation__status-row">
+              <span id="conversation-timer" class="conversation__timer" aria-live="off">00:00</span>
+              <div
+                id="conversation-audio-level"
+                class="conversation__level"
+                role="meter"
+                aria-label="Audio-niveau"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+              >
+                <span class="conversation__level-bar"></span>
+              </div>
+              <span id="conversation-rec-indicator" class="conversation__rec-badge" hidden>REC</span>
+            </div>
+            <p id="conversation-status" class="conversation__status"></p>
+            <div class="conversation__actions">
+              <button type="button" id="btn-conversation-start" class="btn btn--record conversation__start">
+                <span class="btn__dot" aria-hidden="true"></span>
+                START
+              </button>
+              <button type="button" id="btn-conversation-stop" class="btn btn--primary" hidden>
+                STOP
+              </button>
+              <button type="button" id="btn-conversation-cancel" class="btn btn--ghost btn--tiny">
+                Annuleren
+              </button>
+            </div>
+          </div>
+
+          <div id="interview-panel" class="interview" hidden aria-live="polite">
+            <div id="interview-busy" class="interview-busy" hidden aria-live="assertive">
+              <div class="spinner interview-busy__spinner" aria-hidden="true"></div>
+              <p id="interview-busy-text" class="interview-busy__text">Bezig…</p>
+            </div>
+            <p class="interview__intro">MegaMinnie stelt zes vragen; jij antwoordt hardop. Zet geluid aan.</p>
+            <p id="interview-step" class="interview__step"></p>
+            <p id="interview-question" class="interview__question"></p>
+            <p id="interview-status" class="interview__status"></p>
+            <p id="interview-answer-preview" class="interview__answer-preview" hidden></p>
+            <ol id="interview-done-list" class="interview__done-list" hidden></ol>
+            <div class="interview__actions">
+              <button type="button" id="btn-interview-next" class="btn btn--primary">
+                Volgende vraag
+              </button>
+              <button type="button" id="btn-interview-finish" class="btn btn--ghost">
+                Einde verslag
+              </button>
+              <button type="button" id="btn-interview-cancel" class="btn btn--ghost btn--tiny">
+                Stop interview
+              </button>
+            </div>
+          </div>
+
+          <div id="audio-review" class="audio-review" hidden>
+            <div class="audio-review__row">
+              <audio id="audio-preview" class="audio-preview" controls preload="metadata"></audio>
+              <button
+                type="button"
+                id="btn-remove-audio"
+                class="btn btn--ghost btn--tiny"
+                aria-label="Opname verwijderen"
+              >
+                Verwijderen
+              </button>
+            </div>
+          </div>
+
+          <div id="hub-process-slot" class="process-area">
+            <button type="button" id="btn-process" class="btn btn--primary btn--block" disabled>
+              Zet MegaMinnie aan het werk
+            </button>
+            <p id="process-hint" class="process-hint" hidden></p>
+          </div>
+
+          <p id="input-feedback" class="feedback input-feedback" role="status" hidden></p>
+
+          <div id="manual-panel" class="manual-panel" hidden>
+            <label class="field">
+              <span class="field__label">Notitie</span>
+              <textarea
+                id="text-input"
+                rows="8"
+                placeholder="Typ of plak je bezoeknotities…"
+              ></textarea>
+            </label>
+            <div id="manual-process-slot" class="process-area"></div>
+          </div>
+        </section>
+
+        <section
+          class="panel panel--output"
+          id="output-panel"
+          aria-labelledby="output-heading"
+          hidden
+        >
+          <h2 id="output-heading" class="panel__heading">Controle</h2>
+          <p id="result-source-badge" class="result-source-badge" hidden></p>
+
+          <div id="result-area" class="result-area">
+            <label class="field">
+              <span class="field__label">Notitietitel</span>
+              <input type="text" id="note-title" />
+            </label>
+
+            <label class="field">
+              <span class="field__label">Concept-uitwerking</span>
+              <div
+                id="note-body"
+                class="note-body"
+                contenteditable="true"
+                role="textbox"
+                aria-multiline="true"
+                spellcheck="true"
+              ></div>
+            </label>
+
+            <section id="review-section" class="draft-toolbar" hidden>
+              <div class="draft-toolbar__bar">
+                <div class="draft-toolbar__group" role="group" aria-label="Beluister en corrigeer">
+                  <button type="button" id="btn-review-read" class="btn btn--secondary btn--compact">
+                    Voorlezen
+                  </button>
+                  <button type="button" id="btn-review-pause" class="btn btn--ghost btn--compact" hidden>
+                    Pauzeren
+                  </button>
+                  <button type="button" id="btn-review-resume" class="btn btn--ghost btn--compact" hidden>
+                    Hervatten
+                  </button>
+                  <button type="button" id="btn-review-stop" class="btn btn--ghost btn--compact" hidden>
+                    Stoppen
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-voice-correct"
+                    class="btn btn--record btn--record-compact"
+                    aria-pressed="false"
+                  >
+                    <span class="btn__dot" aria-hidden="true"></span>
+                    <span id="voice-correct-label">Mondeling corrigeren</span>
+                  </button>
+                  <button type="button" id="btn-clear-draft" class="btn btn--ghost btn--compact">
+                    Verwijderen
+                  </button>
+                </div>
+
+                <span class="draft-toolbar__sep" aria-hidden="true"></span>
+
+                <div class="draft-toolbar__group" role="group" aria-label="Aanvullen met foto">
+                  <button type="button" id="btn-supplement-pick" class="btn btn--ghost btn--compact">
+                    Foto toevoegen
+                  </button>
+                  <input
+                    type="file"
+                    id="supplement-file"
+                    accept="image/*"
+                    hidden
+                  />
+                  <button
+                    type="button"
+                    id="btn-supplement-process"
+                    class="btn btn--secondary btn--compact"
+                    disabled
+                  >
+                    Foto verwerken
+                  </button>
+                </div>
+              </div>
+
+              <p id="review-status" class="draft-toolbar__status" hidden aria-live="polite"></p>
+
+              <div id="supplement-audio-review" class="audio-review draft-toolbar__media" hidden>
+                <div class="audio-review__row">
+                  <audio
+                    id="supplement-audio-preview"
+                    class="audio-preview"
+                    controls
+                    preload="metadata"
+                  ></audio>
+                  <button
+                    type="button"
+                    id="btn-supplement-remove-audio"
+                    class="btn btn--ghost btn--tiny"
+                    aria-label="Aanvullende opname verwijderen"
+                  >
+                    Verwijderen
+                  </button>
+                </div>
+              </div>
+              <div id="supplement-attachments" class="supplement-attachments draft-toolbar__media" hidden></div>
+            </section>
+
+            <div id="tasks-section" class="subsection" hidden>
+              <h3 class="subsection__title">Taken</h3>
+              <ul id="tasks-list" class="card-list"></ul>
+            </div>
+
+            <div id="events-section" class="subsection" hidden>
+              <h3 class="subsection__title">Agenda</h3>
+              <ul id="events-list" class="card-list"></ul>
+            </div>
+
+            <section id="sf-link" class="sf-panel" hidden>
+              <div class="sf-panel__head">
+                <h3 class="sf-panel__title">Salesforce</h3>
+                <p id="sf-link-hint" class="sf-panel__hint" hidden></p>
+              </div>
+
+              <p id="sf-extracted" class="sf-panel__extracted" hidden></p>
+              <div id="sf-selected" class="sf-panel__selected" hidden></div>
+
+              <div id="sf-suggestions-wrap" class="sf-panel__block" hidden>
+                <p class="sf-panel__label">Voorstel op basis van je invoer</p>
+                <ul id="sf-suggestions" class="sf-hit-list"></ul>
+              </div>
+
+              <div class="sf-panel__block" id="sf-search-block">
+                <label class="sf-panel__field" id="sf-search-wrap">
+                  <span class="sf-panel__label">Zoek klant in Salesforce</span>
+                  <input
+                    type="search"
+                    id="sf-search"
+                    class="sf-panel__search"
+                    placeholder="Bedrijf, contactpersoon of opportunity…"
+                    autocomplete="off"
+                  />
+                </label>
+                <ul id="sf-search-results" class="sf-hit-list sf-panel__results" hidden></ul>
+              </div>
+
+              <div class="sf-panel__actions">
+                <button type="button" id="btn-sync" class="btn btn--secondary" disabled>
+                  Upload naar Salesforce
+                </button>
+                <button type="button" id="btn-copy" class="btn btn--ghost">
+                  Kopieer notitie
+                </button>
+              </div>
+            </section>
+
+            <input type="hidden" id="record-id" value="" />
+
+            <p id="sync-feedback" class="feedback" role="status" hidden></p>
+          </div>
+
+          <div id="loading" class="loading" hidden aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <div id="loading-steps" class="processing-steps" hidden>
+              <span class="processing-steps__item" data-step="1">
+                <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                <span class="processing-steps__item-label">Verwerken</span>
+              </span>
+              <span class="processing-steps__item" data-step="2" hidden>
+                <span class="processing-steps__item-fill" aria-hidden="true"></span>
+                <span class="processing-steps__item-label">Uitwerken</span>
+              </span>
+            </div>
+            <p id="loading-text">Bezig met verwerken…</p>
+            <button type="button" id="btn-cancel-loading" class="btn btn--ghost btn--cancel" hidden>
+              Stoppen
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/js/app.js?v=112"></script>
+  </body>
+</html>

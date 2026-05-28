@@ -1,0 +1,49 @@
+{
+  "name": "megaminnie",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:clean": "powershell -NoProfile -Command \"Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }\"; npm run dev",
+    "whisper:up": "docker compose -f docker-compose.whisper.yml up -d",
+    "whisper:down": "docker compose -f docker-compose.whisper.yml down",
+    "whisper:logs": "docker compose -f docker-compose.whisper.yml logs -f",
+    "whisper:download": "node scripts/whisper-download.mjs",
+    "avatar": "node scripts/build-avatar.mjs",
+    "gif": "python scripts/build-megaminnie-gif.py",
+    "sf:check": "tsx scripts/sf-check.mjs",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint public/js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "jsforce": "^3.6.4",
+    "mammoth": "^1.12.0",
+    "multer": "^1.4.5-lts.2",
+    "openai": "^4.103.0",
+    "pdf-parse": "^2.4.5",
+    "sharp": "^0.34.2",
+    "zod": "^3.25.28"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.2",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.15.21",
+    "@types/pdf-parse": "^1.1.5",
+    "eslint": "^9.27.0",
+    "globals": "^17.6.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}
