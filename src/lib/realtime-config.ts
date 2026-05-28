@@ -1,11 +1,12 @@
 export const DEFAULT_REALTIME_MODEL = "gpt-realtime-mini";
 export const DEFAULT_REALTIME_VOICE = "verse";
+export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
 
 export const REALTIME_POC_INSTRUCTIONS =
-  "Je bent een Nederlandstalige sales assistent. Je voert een kort testgesprek na een klantmeeting. " +
+  "Je bent een Nederlandstalige sales assistent. Je voert een kort gesprek na een klantmeeting. " +
   "Stel eerst één vraag: 'Vertel kort met wie je hebt gesproken en wat het doel van het gesprek was.' " +
   "Luister naar het antwoord. Reageer kort en natuurlijk. Stel maximaal één korte vervolgvraag als iets onduidelijk is. " +
-  "Houd het gesprek compact. Dit is een realtime proof of concept, geen definitief verslag.";
+  "Als de gebruiker 'stop', 'afronden' of 'klaar' zegt, bevestig kort dat je stopt en wacht dan af.";
 
 export function isRealtimeInterviewEnabled(): boolean {
   return process.env.REALTIME_INTERVIEW_ENABLED?.trim().toLowerCase() === "true";
@@ -17,6 +18,13 @@ export function getRealtimeModel(): string {
 
 export function getRealtimeVoice(): string {
   return process.env.OPENAI_REALTIME_VOICE?.trim() || DEFAULT_REALTIME_VOICE;
+}
+
+export function getRealtimeTranscriptionModel(): string {
+  return (
+    process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL?.trim() ||
+    DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+  );
 }
 
 export function getRealtimeInstructions(): string {

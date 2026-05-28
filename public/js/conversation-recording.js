@@ -25,6 +25,7 @@ const RECORDER_TIMESLICE_MS = 1000;
  * @property {(requestId: number) => boolean} isRequestActive
  * @property {() => void} clearInputExceptVoice
  * @property {(result: object) => void} onResult
+ * @property {(transcript: string) => void} [onTranscriptReady]
  * @property {(message: string) => void} onError
  * @property {() => void} onCancel
  */
@@ -428,6 +429,8 @@ async function processConversationSegments(segments) {
     if (!transcript.trim()) {
       throw new Error("Geen spraak herkend in de opname.");
     }
+
+    deps.onTranscriptReady?.(transcript);
 
     deps.setProcessingPhase({
       phase: 2,
