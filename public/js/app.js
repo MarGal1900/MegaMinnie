@@ -26,6 +26,7 @@ import {
   isConversationActive,
   isConversationRecording,
 } from "./conversation-recording.js";
+import { initShareReportEmail } from "./share-report-email.js";
 
 /** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string }} Task */
 /** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string; location?: string }} Event */
@@ -38,7 +39,7 @@ import {
 
 /** Verwerkings-GIF (zelfde asset in prod én test; versie bumpen bij deploy). */
 const MEGAMINNIE_PROCESSING_GIF = "/images/megaminnie-animated-web.gif";
-const MEGAMINNIE_PROCESSING_GIF_VERSION = 4;
+const MEGAMINNIE_PROCESSING_GIF_VERSION = 15;
 
 const state = {
   recording: false,
@@ -1236,6 +1237,7 @@ function updateVoiceCorrectUi() {
 function updateReviewUi() {
   const show = hasUitgewerktResult();
   if (reviewSection) reviewSection.hidden = !show;
+  shareReportEmail.updateVisibility(show);
   if (!show) return;
 
   const pb = state.reviewPlayback;
@@ -1376,21 +1378,19 @@ function setProcessingPhase(opts) {
   updateFlowSteps();
 }
 
-function processingGifUrl() {
-  return `${MEGAMINNIE_PROCESSING_GIF}?v=${MEGAMINNIE_PROCESSING_GIF_VERSION}`;
+function processingGifUrl(cacheBust = false) {
+  const base = `${MEGAMINNIE_PROCESSING_GIF}?v=${MEGAMINNIE_PROCESSING_GIF_VERSION}`;
+  return cacheBust ? `${base}&_=${Date.now()}` : base;
 }
 
 /** Zorg dat de verwerkings-GIF geladen wordt (cache-bust na deploy). */
 function syncProcessingGif(active) {
   if (!miniMegaminnieGif) return;
-  const url = processingGifUrl();
-  if (active) {
-    if (miniMegaminnieGif.dataset.gifVersion !== String(MEGAMINNIE_PROCESSING_GIF_VERSION)) {
-      miniMegaminnieGif.src = url;
-      miniMegaminnieGif.dataset.gifVersion = String(MEGAMINNIE_PROCESSING_GIF_VERSION);
-    }
-    miniMegaminnieGif.hidden = false;
-    return;
+  const v = String(MEGAMINNIE_PROCESSING_GIF_VERSION);
+  const url = processingGifUrl(active);
+  if (miniMegaminnieGif.dataset.gifVersion !== v || active) {
+    miniMegaminnieGif.src = url;
+    miniMegaminnieGif.dataset.gifVersion = v;
   }
   miniMegaminnieGif.hidden = false;
 }
@@ -4585,6 +4585,27 @@ function setBusy(busy, message) {
 placeProcessButton();
 initTestModePreference();
 
+const shareReportEmail = initShareReportEmail({
+  getReportContext: () => {
+    if (!hasUitgewerktResult()) return null;
+    const meetingSubject = $("note-title")?.value.trim() ?? "";
+    const reportBody = getNoteBodyMarkdown();
+    if (!meetingSubject || !reportBody) return null;
+
+    const customer =
+      state.lastResult?.megaMinnie?.customer ??
+      state.lastResult?.salesforceLink?.extractedCustomer;
+
+    return {
+      meetingSubject,
+      reportBody,
+      contactName: customer?.contactName,
+      recipientsInput: customer?.email ?? "",
+    };
+  },
+  onFeedback: (message, type) => showFeedback(message, type),
+});
+
 initConversationRecording({
   showPanel: showConversationPanel,
   setRecordingUi: setConversationRecordingUi,
@@ -4617,3 +4638,4 @@ updateFlowSteps();
 updateOutputVisibility();
 updateSyncButton();
 loadHealth();
+syncProcessingGif(false);
