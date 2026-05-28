@@ -16,7 +16,7 @@
     "avatar": "node scripts/build-avatar.mjs",
     "gif": "python scripts/build-megaminnie-gif.py",
     "sf:check": "tsx scripts/sf-check.mjs",
-    "build": "tsc",
+    "build": "npm run bundle:docx && tsc",
     "bundle:docx": "node scripts/bundle-gespreksverslag-docx.mjs",
     "predev": "npm run bundle:docx",
     "pretest": "npm run bundle:docx",

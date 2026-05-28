@@ -133,7 +133,11 @@ app.use(
   },
 );
 
-app.listen(port, host, () => {
-  console.log(`MegaMinnie: http://${host}:${port}`);
-});
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(port, host, () => {
+    console.log(`MegaMinnie: http://${host}:${port}`);
+  });
+}
 
