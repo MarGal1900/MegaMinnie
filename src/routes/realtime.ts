@@ -1,5 +1,12 @@
 import { Router } from "express";
 import {
+  getSpeechModel,
+  getSpeechVoice,
+  normalizeSpeechText,
+  synthesizeOpenAiSpeech,
+  validateSpeechPrereqs,
+} from "../lib/openai-speech.js";
+import {
   getOpenAiApiKey,
   getRealtimeInstructions,
   getRealtimeModel,
@@ -209,6 +216,36 @@ realtimeRouter.post("/session", async (_req, res, next) => {
       model: session.model,
       voice: session.voice,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+realtimeRouter.post("/speech", async (req, res, next) => {
+  try {
+    const apiKey = getOpenAiApiKey();
+    const prereq = validateSpeechPrereqs(apiKey);
+    if (!prereq.ok) {
+      res.status(prereq.status).json({ error: prereq.error });
+      return;
+    }
+
+    const text = normalizeSpeechText(req.body?.text);
+    if (!text) {
+      res.status(400).json({ error: "Geen tekst om voor te lezen." });
+      return;
+    }
+
+    const audio = await synthesizeOpenAiSpeech({
+      text,
+      apiKey,
+      model: getSpeechModel(),
+      voice: getSpeechVoice(),
+    });
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(audio);
   } catch (err) {
     next(err);
   }

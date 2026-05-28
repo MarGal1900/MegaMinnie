@@ -147,11 +147,9 @@ export function buildShareEmailBody(input) {
  * @returns {string}
  */
 export function buildMailtoComposeUrl(recipients, subject, body) {
-  const params = new URLSearchParams();
-  params.set("subject", subject);
-  params.set("body", body);
+  const query = `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const to = recipients.join(",");
-  return to ? `mailto:${to}?${params.toString()}` : `mailto:?${params.toString()}`;
+  return to ? `mailto:${to}?${query}` : `mailto:?${query}`;
 }
 
 /**
@@ -167,13 +165,13 @@ export function buildOutlookMobileComposeUrl(
   body,
   baseUrl = OUTLOOK_MOBILE_COMPOSE_BASE,
 ) {
-  const params = new URLSearchParams();
+  const params = [];
   if (recipients.length) {
-    params.set("to", recipients.join(","));
+    params.push(`to=${encodeURIComponent(recipients.join(","))}`);
   }
-  params.set("subject", subject);
-  params.set("body", body);
-  return `${baseUrl}?${params.toString()}`;
+  params.push(`subject=${encodeURIComponent(subject)}`);
+  params.push(`body=${encodeURIComponent(body)}`);
+  return `${baseUrl}?${params.join("&")}`;
 }
 
 /**
@@ -233,9 +231,9 @@ export function getOutlookComposeLengthError(target, urlLength) {
 
 /**
  * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
- * @returns {{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget } | { ok: false; error: string }}
+ * @returns {{ ok: true; url: string; recipients: string[]; subject: string; target: OutlookComposeTarget } | { ok: false; error: string }}
  */
-export function shareReportViaEmail(options) {
+export function prepareShareReportEmail(options) {
   const recipients = parseRecipientEmails(options.recipientsInput ?? "");
 
   const reportBody = options.reportBody?.trim();
@@ -262,8 +260,58 @@ export function shareReportViaEmail(options) {
     return { ok: false, error: lengthError };
   }
 
-  openOutlookCompose(composeUrl, target);
-  return { ok: true, recipients, subject, target };
+  return { ok: true, url: composeUrl, recipients, subject, target };
+}
+
+/**
+ * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
+ * @returns {{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget } | { ok: false; error: string }}
+ */
+export function shareReportViaEmail(options) {
+  const prepared = prepareShareReportEmail(options);
+  if (!prepared.ok) return prepared;
+
+  openOutlookCompose(prepared.url, prepared.target);
+  return {
+    ok: true,
+    recipients: prepared.recipients,
+    subject: prepared.subject,
+    target: prepared.target,
+  };
+}
+
+/**
+ * @param {HTMLAnchorElement | null} anchor
+ * @param {ShareReportContext | null} ctx
+ */
+export function syncShareEmailLink(anchor, ctx) {
+  if (!anchor) return;
+
+  if (!ctx) {
+    anchor.removeAttribute("href");
+    anchor.setAttribute("aria-disabled", "true");
+    delete anchor.dataset.shareError;
+    return;
+  }
+
+  const result = prepareShareReportEmail({
+    recipientsInput: ctx.recipientsInput ?? "",
+    meetingSubject: ctx.meetingSubject,
+    reportBody: ctx.reportBody,
+    meetingDate: ctx.meetingDate,
+    contactName: ctx.contactName,
+  });
+
+  if (!result.ok) {
+    anchor.removeAttribute("href");
+    anchor.setAttribute("aria-disabled", "true");
+    anchor.dataset.shareError = result.error;
+    return;
+  }
+
+  anchor.href = result.url;
+  anchor.removeAttribute("aria-disabled");
+  delete anchor.dataset.shareError;
 }
 
 /**
@@ -286,16 +334,43 @@ export function formatOutlookComposeSuccessMessage(target, count) {
  */
 export function initShareReportEmail(deps) {
   const section = document.getElementById("share-report-section");
-  const btn = document.getElementById("btn-share-email");
+  const link = document.getElementById("btn-share-email");
 
-  btn?.addEventListener("click", () => {
+  const refreshLink = () => {
+    if (section?.hidden) return;
+    syncShareEmailLink(link, deps.getReportContext());
+  };
+
+  link?.addEventListener("click", (event) => {
+    const href = link.getAttribute("href");
+    if (href?.startsWith("mailto:") || href?.startsWith(OUTLOOK_MOBILE_COMPOSE_BASE)) {
+      const ctx = deps.getReportContext();
+      const result = ctx
+        ? prepareShareReportEmail({
+            recipientsInput: ctx.recipientsInput ?? "",
+            meetingSubject: ctx.meetingSubject,
+            reportBody: ctx.reportBody,
+            meetingDate: ctx.meetingDate,
+            contactName: ctx.contactName,
+          })
+        : null;
+      if (result?.ok) {
+        deps.onFeedback?.(
+          formatOutlookComposeSuccessMessage(result.target, result.recipients.length),
+          "success",
+        );
+      }
+      return;
+    }
+
+    event.preventDefault();
     const ctx = deps.getReportContext();
     if (!ctx) {
       deps.onFeedback?.("Laat MegaMinnie eerst het verslag uitwerken.", "error");
       return;
     }
 
-    const result = shareReportViaEmail({
+    const result = prepareShareReportEmail({
       recipientsInput: ctx.recipientsInput ?? "",
       meetingSubject: ctx.meetingSubject,
       reportBody: ctx.reportBody,
@@ -303,21 +378,18 @@ export function initShareReportEmail(deps) {
       contactName: ctx.contactName,
     });
 
-    if (!result.ok) {
-      deps.onFeedback?.(result.error, "error");
-      return;
-    }
-
-    deps.onFeedback?.(
-      formatOutlookComposeSuccessMessage(result.target, result.recipients.length),
-      "success",
-    );
+    deps.onFeedback?.(result.error, "error");
   });
+
+  document.getElementById("note-title")?.addEventListener("input", refreshLink);
+  document.getElementById("note-body")?.addEventListener("input", refreshLink);
 
   return {
     /** @param {boolean} show */
     updateVisibility(show) {
       if (section) section.hidden = !show;
+      if (show) refreshLink();
     },
+    refreshLink,
   };
 }

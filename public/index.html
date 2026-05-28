@@ -223,40 +223,6 @@
             <ul id="test-recordings-list" class="test-recordings__list"></ul>
           </div>
 
-          <div id="conversation-panel" class="conversation" hidden aria-live="polite">
-            <p class="conversation__intro">
-              Vrij gesprek opnemen — accountmanager én klant. MegaMinnie luistert mee zonder te interrumperen.
-            </p>
-            <div class="conversation__status-row">
-              <span id="conversation-timer" class="conversation__timer" aria-live="off">00:00</span>
-              <div
-                id="conversation-audio-level"
-                class="conversation__level"
-                role="meter"
-                aria-label="Audio-niveau"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow="0"
-              >
-                <span class="conversation__level-bar"></span>
-              </div>
-              <span id="conversation-rec-indicator" class="conversation__rec-badge" hidden>REC</span>
-            </div>
-            <p id="conversation-status" class="conversation__status"></p>
-            <div class="conversation__actions">
-              <button type="button" id="btn-conversation-start" class="btn btn--record conversation__start">
-                <span class="btn__dot" aria-hidden="true"></span>
-                START
-              </button>
-              <button type="button" id="btn-conversation-stop" class="btn btn--primary" hidden>
-                STOP
-              </button>
-              <button type="button" id="btn-conversation-cancel" class="btn btn--ghost btn--tiny">
-                Annuleren
-              </button>
-            </div>
-          </div>
-
           <div id="interview-panel" class="interview" hidden aria-live="polite">
             <div id="interview-busy" class="interview-busy" hidden aria-live="assertive">
               <div class="spinner interview-busy__spinner" aria-hidden="true"></div>
@@ -420,9 +386,9 @@
             </section>
 
             <section id="share-report-section" class="share-report" hidden>
-              <button type="button" id="btn-share-email" class="btn btn--primary btn--block">
-                Deel verslag via Outlook
-              </button>
+              <a id="btn-share-email" class="btn btn--primary btn--block" href="#" aria-disabled="true">
+                Email verzenden
+              </a>
             </section>
 
             <div id="tasks-section" class="subsection" hidden>
@@ -499,6 +465,6 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=115"></script>
+    <script type="module" src="/js/app.js?v=116"></script>
   </body>
 </html>

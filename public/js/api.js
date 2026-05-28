@@ -27,3 +27,18 @@ export async function apiPost(path, options = {}) {
 export function formFields() {
   return new FormData();
 }
+
+/** @param {string} path @param {Record<string, unknown>} body */
+export async function apiPostBlob(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Fout ${res.status}`);
+  }
+  return res.blob();
+}

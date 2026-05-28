@@ -92,7 +92,7 @@ describe("buildOutlookComposeUrl", () => {
       "desktop",
     );
     expect(url.startsWith("mailto:a@x.nl,b@y.nl?")).toBe(true);
-    expect(url).toContain("subject=Verslag%3A+Test+-+1+mei+2026");
+    expect(url).toContain("subject=Verslag%3A%20Test%20-%201%20mei%202026");
   });
 
   it("gebruikt ms-outlook op mobiel", () => {
@@ -110,12 +110,19 @@ describe("buildOutlookComposeUrl", () => {
 describe("buildMailtoComposeUrl", () => {
   it("encodeert onderwerp en body", () => {
     const url = buildMailtoComposeUrl(["klant@bedrijf.nl"], "Test", "Regel 1");
-    expect(url).toBe("mailto:klant@bedrijf.nl?subject=Test&body=Regel+1");
+    expect(url).toBe("mailto:klant@bedrijf.nl?subject=Test&body=Regel%201");
+  });
+
+  it("encodeert newlines in body", () => {
+    const url = buildMailtoComposeUrl([], "Aanmelding event", "Hallo,\n\nIk wil mij aanmelden.");
+    expect(url).toBe(
+      "mailto:?subject=Aanmelding%20event&body=Hallo%2C%0A%0AIk%20wil%20mij%20aanmelden.",
+    );
   });
 
   it("werkt zonder ontvangers", () => {
     const url = buildMailtoComposeUrl([], "Test", "Regel 1");
-    expect(url).toBe("mailto:?subject=Test&body=Regel+1");
+    expect(url).toBe("mailto:?subject=Test&body=Regel%201");
   });
 });
 

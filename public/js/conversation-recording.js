@@ -222,9 +222,9 @@ async function rolloverSegment() {
   createRecorder(stream);
 }
 
-/** Open gespreksopname-paneel. */
+/** Start vrije gespreksopname direct (microfoon + opname). */
 export async function startConversationRecording() {
-  if (conversationState.phase === "recording") return;
+  if (conversationState.phase === "recording" || conversationState.phase === "processing") return;
   if (!navigator.mediaDevices?.getUserMedia) {
     alert(
       "Opnemen werkt alleen via https:// of http://localhost. Open MegaMinnie lokaal of op een beveiligde verbinding.",
@@ -235,10 +235,7 @@ export async function startConversationRecording() {
   const deps = getDeps();
   resetConversationState();
   deps.clearInputExceptVoice();
-  deps.showPanel(true);
-  deps.setStatus("Druk op START om de opname te beginnen.");
-  deps.updateTimer(0);
-  deps.updateAudioLevel(0);
+  await beginConversationCapture();
 }
 
 /** MediaRecorder starten (START-knop). */
