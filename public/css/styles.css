@@ -854,6 +854,11 @@ body {
   transition: background 0.15s, transform 0.1s, opacity 0.15s;
 }
 
+.btn[hidden],
+button[hidden] {
+  display: none !important;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1638,6 +1643,10 @@ body {
   min-height: 2.65rem;
 }
 
+.btn--mode-beta {
+  border-style: dashed;
+}
+
 .conversation {
   margin-top: 1rem;
   padding: 1.25rem;
@@ -1739,6 +1748,39 @@ body {
 
 .conversation.is-recording .conversation__start {
   display: none;
+}
+
+.realtime {
+  margin-top: 1rem;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised, #faf8f6);
+}
+
+.realtime[hidden] {
+  display: none !important;
+}
+
+.realtime__intro {
+  margin: 0 0 0.85rem;
+  color: var(--ink-muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.realtime__status {
+  margin: 0 0 1rem;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.realtime__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
 }
 
 .note-body strong {

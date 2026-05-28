@@ -19,13 +19,10 @@ import {
 } from "./tasks-events.js";
 import {
   initConversationRecording,
-  startConversationRecording,
-  beginConversationCapture,
-  stopConversationRecording,
   cancelConversationRecording,
   isConversationActive,
-  isConversationRecording,
 } from "./conversation-recording.js";
+import { createRealtimeInterviewController } from "./realtime-interview.js";
 
 /** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string }} Task */
 /** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string; location?: string }} Event */
@@ -90,6 +87,7 @@ const state = {
     processingUI: false,
     processingMessage: "",
     voiceCommandLocked: false,
+    lastVoiceCommandAt: 0,
     commandPollTimer: null,
     commandPollBusy: false,
     commandPollAbort: null,
@@ -104,8 +102,10 @@ const state = {
   },
 };
 
-const INTERVIEW_TTS_RATE = 1.35;
-const REVIEW_TTS_RATE = 1.05;
+const INTERVIEW_TTS_RATE = 0.94;
+const REVIEW_TTS_RATE = 0.98;
+const INTERVIEW_TTS_PAUSE_MS = 280;
+const INTERVIEW_TTS_PAUSE_PUNCTUATION_MS = 420;
 const INTERVIEW_VOICE_POLL_MS = 3500;
 const COMMAND_CHECK_MIN_INTERVAL_MS = 2500;
 const COMMAND_TAIL_CHUNKS = 45;
@@ -113,6 +113,7 @@ const COMMAND_MIN_CHUNKS = 3;
 const COMMAND_MIN_BYTES = 600;
 const COMMAND_SILENCE_RMS = 0.011;
 const COMMAND_SILENCE_MS = 400;
+const INTERVIEW_VOICE_COMMAND_DEBOUNCE_MS = 1000;
 const WHISPER_COMMAND_PROMPT = "volgende vraag. einde verslag. verslag klaar. ga door.";
 const INTERVIEW_RECORDING_STATUS =
   "Spreek je antwoord in. Zeg aan het eind: volgende vraag — of: einde verslag.";
@@ -363,6 +364,8 @@ const btnConversationStop = $("btn-conversation-stop");
 const btnConversationCancel = $("btn-conversation-cancel");
 const btnPickFiles = $("btn-pick-files");
 const recordHint = $("record-hint");
+let realtimeController = null;
+let lastRealtimeTranscript = "";
 
 function setInterviewButtonUi(active) {
   btnInvoer?.classList.toggle("is-recording", active);
@@ -377,11 +380,87 @@ function setConversationButtonUi(active) {
   }
 }
 
+function setRealtimeStatus(message) {
+  setConversationStatus(message);
+}
+
+function isRealtimeConversationRunning() {
+  return Boolean(realtimeController?.isActive() || realtimeController?.isConnecting());
+}
+
+function stopRealtimeInterview(status = "Gestopt") {
+  realtimeController?.stop(status);
+}
+
+async function processRealtimeConversationTranscript(transcript) {
+  const cleanedTranscript = String(transcript || "").trim();
+  if (!cleanedTranscript) {
+    showFeedback(
+      "Geen transcript ontvangen uit het realtime gesprek. Probeer opnieuw of gebruik Opname gesprek.",
+      "error",
+    );
+    return;
+  }
+
+  const processId = ++activeProcessId;
+  const { requestId, signal } = beginRequest();
+  stopReviewPlayback();
+  updateFlowSteps();
+  setInputBusy(true, "Realtime gesprek verwerken…");
+  setProcessingPhase({
+    phase: 2,
+    progress: 50,
+    transcribing: false,
+    message: "MegaMinnie werkt je realtime gesprek uit…",
+  });
+  hideFeedback();
+
+  try {
+    const result = await runWithProgressTicker(
+      50,
+      98,
+      estimateLlmDurationMs(cleanedTranscript.length),
+      () =>
+        apiPost("/api/visit-report/conversation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript: cleanedTranscript }),
+          signal,
+        }),
+    );
+    applyProgressPct(100);
+
+    if (!isRequestActive(requestId)) return;
+    if (processId !== activeProcessId) return;
+
+    state.lastResult = result;
+    updateFlowSteps();
+    renderResult(result);
+    clearAllInputSources();
+    updateProcessUi();
+    showFeedback("Realtime gesprek is uitgewerkt.", "success");
+    if (outputPanel && !outputPanel.hidden) {
+      outputPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  } catch (err) {
+    if (!isRequestActive(requestId)) return;
+    if (isAbortError(err)) return;
+    showProcessingError(
+      err instanceof Error ? err.message : "Realtime verwerking mislukt",
+    );
+  } finally {
+    if (isRequestActive(requestId)) {
+      activeAbort = null;
+      setInputBusy(false);
+    }
+  }
+}
+
 /** @param {boolean} visible */
 function showConversationPanel(visible) {
   if (!conversationPanel) return;
   conversationPanel.hidden = !visible;
-  conversationPanel.classList.toggle("is-recording", isConversationRecording());
+  conversationPanel.classList.toggle("is-recording", isRealtimeConversationRunning());
   if (!visible) {
     if (conversationTimer) conversationTimer.textContent = "00:00";
     if (conversationLevelBar) conversationLevelBar.style.width = "0%";
@@ -411,7 +490,7 @@ function updateConversationAudioLevel(level) {
 function setConversationStatus(message, phase = null) {
   if (!conversationStatus) return;
   conversationStatus.textContent = message;
-  conversationStatus.classList.toggle("is-recording", phase === null && isConversationRecording());
+  conversationStatus.classList.toggle("is-recording", phase === null && isRealtimeConversationRunning());
 }
 
 /** @param {boolean} recording */
@@ -1024,6 +1103,7 @@ function clearInputExcept(keep) {
     setInterviewButtonUi(false);
     showConversationPanel(false);
     if (isConversationActive()) cancelConversationRecording();
+    if (isRealtimeConversationRunning()) stopRealtimeInterview();
   }
   if (keep !== "text") {
     if (textInput) textInput.value = "";
@@ -1147,7 +1227,7 @@ function speakInterviewText(text, { requireActive = true } = {}) {
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "nl-NL";
     utter.rate = INTERVIEW_TTS_RATE;
-    utter.pitch = interviewVoiceUsesPitchBoost ? 1.28 : 1.08;
+    utter.pitch = interviewVoiceUsesPitchBoost ? 1.05 : 1.0;
     if (preferredNlVoice) {
       utter.voice = preferredNlVoice;
     }
@@ -1155,6 +1235,11 @@ function speakInterviewText(text, { requireActive = true } = {}) {
     utter.onerror = () => resolve();
     window.speechSynthesis.speak(utter);
   });
+}
+
+function interviewSpeechPauseFor(text) {
+  if (/[.!?]\s*$/.test(text)) return INTERVIEW_TTS_PAUSE_PUNCTUATION_MS;
+  return INTERVIEW_TTS_PAUSE_MS;
 }
 
 async function speakAndWait(text, { requireActive = true } = {}) {
@@ -1165,6 +1250,9 @@ async function speakAndWait(text, { requireActive = true } = {}) {
   state.interview.speaking = true;
   renderInterviewUi();
   await speakInterviewText(text, { requireActive });
+  if (!requireActive || state.interview.active) {
+    await new Promise((r) => setTimeout(r, interviewSpeechPauseFor(text)));
+  }
   state.interview.speaking = false;
   renderInterviewUi();
 }
@@ -1451,6 +1539,7 @@ function createEmptyInterviewState(overrides = {}) {
     processingUI: false,
     processingMessage: "",
     voiceCommandLocked: false,
+    lastVoiceCommandAt: 0,
     commandPollTimer: null,
     commandPollBusy: false,
     commandPollAbort: null,
@@ -1515,25 +1604,27 @@ function triggerInterviewVoiceCommand(cmd) {
   if (cmd === "advance" && !iv.recordingAnswer) return;
 
   iv.voiceCommandLocked = true;
+  iv.lastVoiceCommandAt = Date.now();
   stopVoiceCommandListening();
 
   if (cmd === "finish") {
-    setInterviewProcessing(true, "Einde verslag herkend…");
-    void finishInterviewAnswer({ advance: false, finish: true });
+    endInterviewReport();
   } else {
     setInterviewProcessing(true, "Volgende vraag herkend…");
-    void finishInterviewAnswer({ advance: true, finish: false });
+    nextInterviewQuestion();
   }
 }
 
 function tryVoiceCommandFromText(text) {
   const iv = state.interview;
+  const now = Date.now();
   if (
     !iv.active ||
     !iv.recordingAnswer ||
     iv.speaking ||
     iv.voiceCommandLocked ||
-    iv.processingAnswer
+    iv.processingAnswer ||
+    now - iv.lastVoiceCommandAt < INTERVIEW_VOICE_COMMAND_DEBOUNCE_MS
   ) {
     return false;
   }
@@ -1987,6 +2078,7 @@ async function presentInterviewStep() {
 async function startInterview() {
   if (state.interview.active) return;
   if (isConversationActive()) cancelConversationRecording();
+  if (isRealtimeConversationRunning()) stopRealtimeInterview();
   showConversationPanel(false);
   if (!(await ensureInterviewSpeech())) return;
 
@@ -2416,6 +2508,7 @@ function clearAllInputSources() {
   setInterviewButtonUi(false);
   showConversationPanel(false);
   if (isConversationActive()) cancelConversationRecording();
+  if (isRealtimeConversationRunning()) stopRealtimeInterview();
   if (textInput) textInput.value = "";
   state.documentNames = [];
   hideManualPanel();
@@ -2913,6 +3006,12 @@ async function loadHealth() {
     state.dryRun = Boolean(data.dryRun);
     state.keepInput = readTestModePreference(Boolean(data.keepInput));
     state.salesforceConfigured = Boolean(data.salesforceConfigured);
+    const realtimeEnabled = data.realtimeInterviewEnabled !== false;
+    if (btnConversation) btnConversation.toggleAttribute("disabled", !realtimeEnabled);
+    if (!realtimeEnabled && !conversationPanel?.hidden) {
+      stopRealtimeInterview("Realtime uitgeschakeld");
+      showConversationPanel(false);
+    }
 
     if (state.keepInput) {
       await restoreTestAudio();
@@ -2983,6 +3082,9 @@ async function loadHealth() {
   } catch {
     badge.textContent = "Offline";
     badge.className = "badge badge--muted";
+    if (btnConversation) btnConversation.setAttribute("disabled", "");
+    stopRealtimeInterview("Niet verbonden");
+    showConversationPanel(false);
     updateTestModeUi();
   }
 }
@@ -3058,6 +3160,9 @@ btnInvoer?.addEventListener("click", (e) => {
   if (isConversationActive()) {
     cancelConversationRecording();
   }
+  if (isRealtimeConversationRunning()) {
+    stopRealtimeInterview();
+  }
   showConversationPanel(false);
   void startInterview();
 });
@@ -3068,31 +3173,38 @@ btnConversation?.addEventListener("click", (e) => {
   if (state.interview.active) {
     cancelInterview();
   }
-  if (isConversationRecording()) {
-    void stopConversationRecording();
-    return;
-  }
   if (conversationPanel?.hidden) {
     showInterviewPanel(false);
-    void startConversationRecording();
+    setConversationStatus("Druk op START om het gesprek te beginnen.");
+    showConversationPanel(true);
   } else {
-    cancelConversationRecording();
+    stopRealtimeInterview();
+    showConversationPanel(false);
   }
 });
 
 btnConversationStart?.addEventListener("click", (e) => {
   e.preventDefault();
-  void beginConversationCapture();
+  lastRealtimeTranscript = "";
+  void realtimeController?.start();
 });
 
 btnConversationStop?.addEventListener("click", (e) => {
   e.preventDefault();
-  void stopConversationRecording();
+  const transcript = realtimeController?.consumeTranscript() || lastRealtimeTranscript || "";
+  lastRealtimeTranscript = "";
+  stopRealtimeInterview();
+  if (transcript.trim()) {
+    void processRealtimeConversationTranscript(transcript);
+  } else {
+    showFeedback("Realtime gesprek gestopt.", "success");
+  }
 });
 
 btnConversationCancel?.addEventListener("click", (e) => {
   e.preventDefault();
-  cancelConversationRecording();
+  stopRealtimeInterview();
+  showConversationPanel(false);
 });
 
 btnInterviewNext?.addEventListener("click", (e) => {
@@ -4073,11 +4185,11 @@ function updateProcessUi() {
   if (conversationPanel && !conversationPanel.hidden) {
     btnProcess.disabled = true;
     if (processHint) {
-      if (isConversationRecording()) {
+      if (realtimeController?.isConnecting()) {
+        processHint.textContent = "Realtime gesprek verbinden…";
+      } else if (isRealtimeConversationRunning()) {
         processHint.textContent =
           "Gespreksopname loopt — druk op STOP als de afspraak klaar is.";
-      } else if (isConversationActive()) {
-        processHint.textContent = "Gesprek wordt verwerkt…";
       } else {
         processHint.textContent = "Druk op START om het gesprek op te nemen.";
       }
@@ -4611,6 +4723,30 @@ initConversationRecording({
   onError: (message) => showInputFeedback(message, "error"),
   onCancel: () => updateProcessUi(),
 });
+
+realtimeController = createRealtimeInterviewController({
+  setStatus: setRealtimeStatus,
+  onStateChange: (rtState) => {
+    setConversationRecordingUi(Boolean(rtState.active || rtState.connecting));
+    if (!rtState.active && !rtState.connecting && !conversationPanel?.hidden) {
+      setConversationStatus("Druk op START om het gesprek te beginnen.");
+    }
+    updateProcessUi();
+  },
+  onTranscriptUpdate: (transcript) => {
+    lastRealtimeTranscript = transcript;
+  },
+  onError: (message) => {
+    setRealtimeStatus("Fout bij realtime sessie");
+    showFeedback(message, "error");
+  },
+  onDebugEvent: (message) => {
+    // Debug-only; active with ?realtimeDebug=1
+    console.debug(message);
+  },
+});
+setRealtimeStatus("Niet verbonden");
+setConversationRecordingUi(false);
 
 updateProcessUi();
 updateFlowSteps();

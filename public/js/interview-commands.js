@@ -3,15 +3,49 @@ export function normalizeCommandText(text) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
-    .replace(/[.,!?;:]/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+const NEXT_QUESTION_COMMANDS = new Set([
+  "volgende vraag",
+  "volgende",
+  "ga door",
+  "naar de volgende vraag",
+  "stel de volgende vraag",
+  "next",
+  "next question",
+]);
+
+const NEXT_QUESTION_COMMAND_ALT =
+  "naar\\s+de\\s+volgende\\s+vraag|stel\\s+de\\s+volgende\\s+vraag|next\\s+question|volgende\\s+vraag|ga\\s+door|volgende|next";
+const NEXT_QUESTION_COMMAND_AT_END_RE = new RegExp(
+  `(?:^|[.!?,;:]\\s*)(?:${NEXT_QUESTION_COMMAND_ALT})[.!?,;:]*\\s*$`,
+  "iu",
+);
+
+export function isNextQuestionCommand(transcript) {
+  const normalized = normalizeCommandText(transcript);
+  if (!normalized) return false;
+  return NEXT_QUESTION_COMMANDS.has(normalized);
+}
+
+function hasTrailingNextQuestionCommand(transcript) {
+  if (typeof transcript !== "string") return false;
+  const text = transcript.trim();
+  if (!text) return false;
+  return NEXT_QUESTION_COMMAND_AT_END_RE.test(text);
 }
 
 /** @returns {"advance"|"finish"|null} */
 export function detectInterviewCommand(text) {
   const n = normalizeCommandText(text);
   if (!n) return null;
+
+  if (isNextQuestionCommand(n)) {
+    return "advance";
+  }
 
   if (
     /\beinde\s+verslag\b/.test(n) ||
@@ -24,21 +58,6 @@ export function detectInterviewCommand(text) {
   ) {
     return "finish";
   }
-
-  const advance =
-    /\bvolgende\s+vraag\b/.test(n) ||
-    /\bvolgende\s+vraak\b/.test(n) ||
-    /\bvolgende\s+vrag\b/.test(n) ||
-    /\bvolgende\s+graag\b/.test(n) ||
-    /\bde\s+volgende\s+vraag\b/.test(n) ||
-    /\bvolgende\b.*\bvraag\b/.test(n) ||
-    /\bvraag\b.*\bvolgende\b/.test(n) ||
-    /\bnaar\s+de\s+volgende\b/.test(n) ||
-    /\bga\s+door\b/.test(n) ||
-    /\bvolgend\b/.test(n) ||
-    (n.includes("volgend") && (n.includes("vraag") || n.includes("vraak") || n.includes("vrag")));
-
-  if (advance) return "advance";
   return null;
 }
 
@@ -46,7 +65,7 @@ export function detectInterviewCommand(text) {
 export function detectInterviewCommandAtTail(text) {
   const n = normalizeCommandText(text);
   if (!n) return null;
-  const tail = n.slice(-100);
+  const tail = n.slice(-120);
 
   if (
     /\beinde\s+verslag\b/.test(tail) ||
@@ -57,32 +76,29 @@ export function detectInterviewCommandAtTail(text) {
     return "finish";
   }
 
-  if (
-    /\bvolgende\s+vraag\b/.test(tail) ||
-    /\bvolgende\s+vraak\b/.test(tail) ||
-    /\bvolgende\s+vrag\b/.test(tail) ||
-    /\bde\s+volgende\s+vraag\b/.test(tail) ||
-    /\bga\s+door\b/.test(tail) ||
-    (tail.includes("volgend") && tail.includes("vraag")) ||
-    (tail.includes("volgende") && tail.includes("vraag")) ||
-    /\bvolgend\b/.test(tail)
-  ) {
-    return "advance";
-  }
+  if (isNextQuestionCommand(tail) || hasTrailingNextQuestionCommand(text)) return "advance";
 
   return detectInterviewCommand(n);
 }
 
 export function parseAnswerTranscript(text) {
-  const cmd = detectInterviewCommand(text);
-  const advanceNext = cmd === "advance";
+  const original = typeof text === "string" ? text : "";
+  const normalized = original.replace(/\s+/g, " ").trim();
+  const advanceNext =
+    isNextQuestionCommand(original) || hasTrailingNextQuestionCommand(original);
+  const cmd = advanceNext ? "advance" : detectInterviewCommand(text);
   const endReport = cmd === "finish";
-  const cleaned = text
-    .replace(
-      /\b(volgende\s+vraag|de\s+volgende\s+vraag|einde\s+verslag|verslag\s+klaar|ga\s+door)\b/gi,
-      "",
-    )
-    .replace(/\s+/g, " ")
-    .trim();
+  let cleaned = normalized;
+  if (advanceNext) {
+    cleaned = normalized
+      .replace(NEXT_QUESTION_COMMAND_AT_END_RE, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  } else if (endReport) {
+    cleaned = normalized
+      .replace(/\b(einde\s+verslag|verslag\s+klaar)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
   return { cleaned, endReport, advanceNext };
 }

@@ -2,12 +2,45 @@ import { describe, expect, it } from "vitest";
 import {
   detectInterviewCommand,
   detectInterviewCommandAtTail,
+  isNextQuestionCommand,
   parseAnswerTranscript,
 } from "../public/js/interview-commands.js";
 
+describe("isNextQuestionCommand", () => {
+  it("herkent command-only varianten voor volgende vraag", () => {
+    const positives = [
+      "volgende vraag",
+      "Volgende vraag.",
+      "volgende",
+      "ga door",
+      "naar de volgende vraag",
+      "stel de volgende vraag",
+      "next",
+      "next question",
+      "  NEXT   QUESTION! ",
+      "Naar de volgende vraag,",
+    ];
+    for (const sample of positives) {
+      expect(isNextQuestionCommand(sample), sample).toBe(true);
+    }
+  });
+
+  it("negeert inhoudelijke zinnen met volgende vraag", () => {
+    const negatives = [
+      "Ik denk dat we volgende vraag moeten bespreken",
+      "De volgende vraag van de klant ging over pricing",
+      "Mijn volgende vraag is nog niet beantwoord",
+      "Kun je uitleggen wat de volgende vraag betekent?",
+    ];
+    for (const sample of negatives) {
+      expect(isNextQuestionCommand(sample), sample).toBe(false);
+    }
+  });
+});
+
 describe("detectInterviewCommand", () => {
   it("herkent volgende vraag", () => {
-    expect(detectInterviewCommand("ok volgende vraag")).toBe("advance");
+    expect(detectInterviewCommand("volgende vraag")).toBe("advance");
     expect(detectInterviewCommand("Volgende vraag.")).toBe("advance");
   });
 
@@ -21,7 +54,7 @@ describe("detectInterviewCommand", () => {
 });
 
 describe("detectInterviewCommandAtTail", () => {
-  it("herkent commando aan het einde van een lang antwoord", () => {
+  it("herkent een trailing commando na antwoord", () => {
     const text =
       "We bespraken het prijsvoorstel en de planning voor Q3. De klant was positief. Volgende vraag.";
     expect(detectInterviewCommandAtTail(text)).toBe("advance");
@@ -30,14 +63,32 @@ describe("detectInterviewCommandAtTail", () => {
   it("herkent korte opdracht", () => {
     expect(detectInterviewCommandAtTail("volgende vraag")).toBe("advance");
   });
+
+  it("negeert inhoudelijke zinnen zonder trailing command intent", () => {
+    expect(
+      detectInterviewCommandAtTail("Ik denk dat we volgende vraag moeten bespreken"),
+    ).toBe(null);
+  });
 });
 
 describe("parseAnswerTranscript", () => {
-  it("strippt commando uit transcript", () => {
-    const { cleaned, advanceNext } = parseAnswerTranscript(
-      "Het ging goed. Volgende vraag.",
-    );
+  it("strippt command-only transcript voor volgende vraag", () => {
+    const { cleaned, advanceNext } = parseAnswerTranscript("Volgende vraag.");
     expect(advanceNext).toBe(true);
-    expect(cleaned).not.toMatch(/volgende vraag/i);
+    expect(cleaned).toBe("");
+  });
+
+  it("laat niet-command transcript intact", () => {
+    const text = "De volgende vraag van de klant ging over pricing";
+    const { cleaned, advanceNext } = parseAnswerTranscript(text);
+    expect(advanceNext).toBe(false);
+    expect(cleaned).toBe(text);
+  });
+
+  it("behoudt inhoud en strippt trailing command", () => {
+    const text = "Het schadeportaal. Volgende vraag.";
+    const { cleaned, advanceNext } = parseAnswerTranscript(text);
+    expect(advanceNext).toBe(true);
+    expect(cleaned).toBe("Het schadeportaal");
   });
 });

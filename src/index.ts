@@ -11,9 +11,11 @@ import { getWhisperProvider, isWhisperConfigured } from "./lib/whisper-config.js
 import { isWhisperServiceReachable } from "./lib/whisper-health.js";
 import { isApiKeyRequired, requireApiKey } from "./lib/auth.js";
 import { isKeepInputEnabled } from "./lib/keep-input.js";
+import { isRealtimeInterviewEnabled } from "./lib/realtime-config.js";
 import { getSalesforceConfigStatus } from "./lib/salesforce-config.js";
 import { checkSalesforceConnection } from "./lib/salesforce-health.js";
 import { salesforceRouter } from "./routes/salesforce.js";
+import { realtimeRouter } from "./routes/realtime.js";
 import { visitReportRouter } from "./routes/visit-report.js";
 
 const app = express();
@@ -75,6 +77,7 @@ app.get("/health", async (_req, res) => {
     salesforceLiveUpload: sfStatus.liveUploadEnabled,
     apiKeyRequired: isApiKeyRequired(),
     keepInput: isKeepInputEnabled(),
+    realtimeInterviewEnabled: isRealtimeInterviewEnabled(),
     hint,
   });
 });
@@ -87,6 +90,7 @@ app.get("/", (_req, res) => {
 app.use("/api", requireApiKey);
 app.use("/api/visit-report", visitReportRouter);
 app.use("/api/salesforce", salesforceRouter);
+app.use("/api/realtime", realtimeRouter);
 app.use(
   express.static(publicDir, {
     setHeaders(res, filePath) {
