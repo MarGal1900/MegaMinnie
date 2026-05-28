@@ -49,7 +49,7 @@ Cloud (zonder `WHISPER_BASE_URL`), standaard `WHISPER_PROFILE=quality` → `gpt-
 | `npm run typecheck` | Alleen typecontrole |
 | `npm run lint` | ESLint |
 | `npm run avatar` | Genereert header-avatar (`public/images/`) |
-| `npm run gif` | Genereert verwerkings-GIF (`public/images/megaminnie-animated-web.gif`) |
+| `npm run gif` | Genereert verwerkings-GIF uit `public/images/megaminnie-side.png` (zijaanzicht) |
 | `npm run sf:check` | Test Salesforce-login en configuratie |
 | `npm run whisper:up` | Start lokaal Whisper via Docker |
 | `npm run whisper:down` | Stop Whisper-container |

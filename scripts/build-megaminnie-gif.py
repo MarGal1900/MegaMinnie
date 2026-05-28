@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genereer een looping MegaMinnie GIF: horizontaal vliegend, wapperende cape, scrollende achtergrond."""
+"""Genereer een looping MegaMinnie GIF: zijaanzicht, horizontale vlucht, wapperende cape."""
 
 from __future__ import annotations
 
@@ -13,17 +13,20 @@ from scipy.ndimage import convolve, gaussian_filter, map_coordinates
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "public" / "images" / "megaminnie.png"
+SOURCE = ROOT / "public" / "images" / "megaminnie-side.png"
 OUTPUT = ROOT / "public" / "images" / "megaminnie-animated.gif"
 WEB_OUTPUT = ROOT / "public" / "images" / "megaminnie-animated-web.gif"
 WEB_WIDTH = 395
 
 FPS = 24
-DURATION_SEC = 3.5
+DURATION_SEC = 2.0
 MOTION_BLUR = 17
-CAPE_AMP = 34.0
-FLY_ANGLE = -42.0  # horizontale vliegpose (lichaam schuin/horizontaal)
-FLY_SCALE = 1.06
+CAPE_AMP_X = 42.0  # horizontale rimpels
+CAPE_AMP_Y = 2.0  # minimaal op/neer
+CAPE_SHIFT_X = 16.0  # duidelijke heen/weer-beweging (zichtbaar in GIF)
+FLY_SCALE = 1.0
+LEVEL_ANGLE = -14.0  # bron licht schuin → horizontaal in beeld (geen zijaanzicht-kanteling)
+CAPE_PHASE_SPEED = 3.15
 
 
 def load_rgba(path: Path) -> Image.Image:
@@ -34,14 +37,19 @@ def rgba_to_np(img: Image.Image) -> np.ndarray:
     return np.array(img, dtype=np.uint8)
 
 
-def orient_horizontal(fg: np.ndarray, angle: float = FLY_ANGLE, scale: float = FLY_SCALE) -> np.ndarray:
-    """Kantel MegaMinnie naar horizontale vliegpose."""
+def prepare_foreground(
+    fg: np.ndarray,
+    scale: float = FLY_SCALE,
+    level_angle: float = LEVEL_ANGLE,
+) -> np.ndarray:
+    """Schaal en optioneel rechtleggen (vlucht horizontaal, geen kanteling)."""
     img = Image.fromarray(fg, "RGBA")
     w, h = img.size
     if scale != 1.0:
         img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-    rotated = img.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True)
-    return rgba_to_np(rotated)
+    if level_angle != 0.0:
+        img = img.rotate(level_angle, resample=Image.Resampling.BICUBIC, expand=True)
+    return rgba_to_np(img)
 
 
 def inpaint_background(original: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -66,8 +74,20 @@ def motion_blur_horizontal(rgb: np.ndarray, size: int) -> np.ndarray:
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def pink_cape_hint(fg: np.ndarray) -> np.ndarray:
+    """Herken roze cape (niet wit pak / blauwe lucht)."""
+    rgb = fg[:, :, :3].astype(np.float32)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    return (r > 155) & (r > g * 1.15) & (r > b * 0.95) & (g < 175)
+
+
+def leg_feet_corridor(along: np.ndarray, across: np.ndarray) -> np.ndarray:
+    """Benen + voeten + roze laarzen — nooit cape of warp."""
+    return (along < 0.50) & (np.abs(across) < 0.54)
+
+
 def character_masks(fg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Splits voorgrond in vast lichaam en wapperende cape."""
+    """Vast lichaam (profiel) + cape op de rug (links achter bij vlucht naar rechts)."""
     h, w = fg.shape[:2]
     alpha = fg[:, :, 3].astype(np.float32) / 255.0
     ys, xs = np.where(alpha > 0.12)
@@ -78,58 +98,70 @@ def character_masks(fg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     x0, x1 = xs.min(), xs.max()
     y0, y1 = ys.min(), ys.max()
     bw, bh = x1 - x0 + 1, y1 - y0 + 1
-    cx = (x0 + x1) / 2.0
 
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    rel_x = (xx - cx) / max(bw * 0.52, 1.0)
-    rel_y = (yy - (y0 + bh * 0.4)) / max(bh * 0.52, 1.0)
+    along = (xx - x0) / max(bw, 1.0)
+    across = (yy - (y0 + y1) / 2.0) / max(bh * 0.5, 1.0)
 
-    body = alpha > 0.12
-    body &= np.abs(rel_x) < 0.48
-    body &= yy <= y0 + bh * 0.82
-    body |= (yy <= y0 + bh * 0.36) & (alpha > 0.12)
+    visible = alpha > 0.12
+    pink = pink_cape_hint(fg)
+    legs = leg_feet_corridor(along, across)
 
-    cape = (alpha > 0.12) & ~body
-    # Extra cape-rand meenemen
-    cape |= (alpha > 0.12) & (np.abs(rel_x) > 0.38) & (yy > y0 + bh * 0.12)
-    cape &= ~body
+    # Kern lichaam inclusief benen, laarzen, torso (roze laarzen ≠ cape)
+    core_body = visible & (
+        (along > 0.26)
+        | legs
+        | ((along > 0.10) & (along < 0.52) & (np.abs(across) < 0.50))
+    )
+
+    # Cape: alleen roze trail links, boven/onder romp — nooit beengebied
+    cape = pink & visible & (along < 0.40) & (np.abs(across) > 0.28) & ~core_body & ~legs
+    cape &= ~legs
+
+    body = visible & ~cape
     return body, cape
 
 
-def warp_layer(layer: np.ndarray, cape_mask: np.ndarray, phase: float) -> np.ndarray:
-    """Warp alleen cape-pixels; lichaam blijft ongemoeid."""
+def warp_layer(
+    layer: np.ndarray,
+    cape_mask: np.ndarray,
+    body_mask: np.ndarray,
+    phase: float,
+) -> np.ndarray:
+    """Warp alleen cape op de rug; lichaam (profiel) blijft vast."""
     h, w = layer.shape[:2]
     alpha = layer[:, :, 3].astype(np.float32) / 255.0
     if alpha.max() <= 0:
         return layer
 
-    ys, xs = np.where(cape_mask)
-    if len(xs) == 0:
+    if not cape_mask.any():
         return layer
 
-    x0, x1 = xs.min(), xs.max()
-    y0, y1 = ys.min(), ys.max()
-    bw, bh = x1 - x0 + 1, y1 - y0 + 1
-    cx = (x0 + x1) / 2.0
-
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    rel_x = (xx - cx) / max(bw * 0.55, 1.0)
-    rel_y = (yy - (y0 + bh * 0.35)) / max(bh * 0.65, 1.0)
+    # Globale vlucht-as (niet alleen cape-bbox) voor consistente golven
+    ys_all, xs_all = np.where(alpha > 0.12)
+    gx0, gx1 = xs_all.min(), xs_all.max()
+    gy0, gy1 = ys_all.min(), ys_all.max()
+    gbw, gbh = gx1 - gx0 + 1, gy1 - gy0 + 1
+    along = (xx - gx0) / max(gbw, 1.0)
+    across = (yy - (gy0 + gy1) / 2.0) / max(gbh * 0.5, 1.0)
 
     weight = cape_mask.astype(np.float32) * alpha
-    weight *= np.clip((np.abs(rel_x) - 0.02) / 0.98, 0.2, 1.0)
-    # Achterliggende cape (links) wappert harder in horizontale vlucht
-    trail = np.clip((cx - xx) / max(bw * 0.55, 1.0), 0.0, 1.0)
-    weight *= 0.35 + 0.65 * trail
+    weight *= ~leg_feet_corridor(along, across)
+    trail = np.clip((0.38 - along) / 0.38, 0.0, 1.0)
+    weight *= 0.35 + 0.95 * trail
+    flatness = 1.0 - np.clip((np.abs(across) - 0.18) / 0.34, 0.0, 0.65)
+    weight *= 0.55 + 0.45 * flatness
 
-    wave1 = np.sin(rel_y * 9.5 + phase * 1.45)
-    wave2 = np.sin(rel_x * 7.0 - phase * 1.85 + rel_y * 5.0) * 0.75
-    wave3 = np.sin(phase * 2.2 + rel_x * 11.0) * 0.45
-    disp_y = (wave1 + wave2 + wave3) * CAPE_AMP * weight
-    disp_x = (
-        np.sin(phase * 1.35 + rel_y * 7.5) * 0.7
-        + np.cos(phase * 1.9 - rel_x * 4.5) * 0.35
-    ) * CAPE_AMP * weight
+    p = phase * CAPE_PHASE_SPEED
+    wave_main = np.sin(along * 20.0 - p * 2.9)
+    wave_fast = np.sin(along * 28.0 - p * 3.6) * 0.65
+    wave_tail = np.cos(p * 2.6 - along * 10.0) * 0.55
+    wave_end = np.sin(along * 14.0 - p * 2.1) * trail * 0.5
+    ripple = (wave_main + wave_fast + wave_tail + wave_end) * CAPE_AMP_X * weight
+    sway_x = np.sin(p) * CAPE_SHIFT_X * weight
+    disp_x = ripple + sway_x
+    disp_y = np.sin(across * 4.0 + p * 0.9) * 0.08 * CAPE_AMP_Y * weight
 
     src_y = np.clip(yy - disp_y, 0, h - 1)
     src_x = np.clip(xx - disp_x, 0, w - 1)
@@ -143,7 +175,6 @@ def warp_layer(layer: np.ndarray, cape_mask: np.ndarray, phase: float) -> np.nda
             mode="nearest",
         ).astype(np.uint8)
 
-    body_mask = (~cape_mask) & (alpha > 0.12)
     out = warped.copy()
     out[body_mask] = layer[body_mask]
     return out
@@ -176,8 +207,8 @@ def build_frames(
     source: Path,
     fps: int = FPS,
     duration_sec: float = DURATION_SEC,
-) -> list[Image.Image]:
-    print("Laad bronafbeelding…")
+) -> tuple[list[Image.Image], list[Image.Image]]:
+    print("Laad bronafbeelding (zijaanzicht)…")
     original = load_rgba(source)
     orig_np = rgba_to_np(original)
 
@@ -185,66 +216,97 @@ def build_frames(
     fg_cutout = remove(original)
     fg_np_orig = rgba_to_np(fg_cutout)
     alpha = fg_np_orig[:, :, 3]
-    fg_np = orient_horizontal(fg_np_orig)
+    fg_np = prepare_foreground(fg_np_orig)
     body_mask, cape_mask = character_masks(fg_np)
+    cape_px = int(cape_mask.sum())
+    print(f"Cape-masker: {cape_px} pixels")
+    if cape_px < 5000:
+        print("Waarschuwing: weinig cape-pixels — animatie kan onzichtbaar zijn.")
 
-    print("Bereid scrollbare achtergrond voor…")
+    print("Bereid achtergrond voor…")
     bg_clean = inpaint_background(orig_np[:, :, :3], alpha)
     tile = np.concatenate([bg_clean, bg_clean], axis=1)
-
     h, w = orig_np.shape[:2]
+    bg_static = motion_blur_horizontal(bg_clean, MOTION_BLUR)
+
     fg_h, fg_w = fg_np.shape[:2]
     scroll_px = w
-
     base_x = (w - fg_w) // 2
-    base_y = (h - fg_h) // 2 + int(h * 0.02)
+    base_y = (h - fg_h) // 2
+
+    fg_ys, fg_xs = np.where(fg_np[:, :, 3] > 12)
+    pad_x, pad_y = 48, 36
+    subject_box = (
+        max(0, base_x + int(fg_xs.min()) - pad_x),
+        max(0, base_y + int(fg_ys.min()) - pad_y),
+        min(w, base_x + int(fg_xs.max()) + pad_x),
+        min(h, base_y + int(fg_ys.max()) + pad_y),
+    )
 
     total_frames = max(2, int(round(fps * duration_sec)))
     frames: list[Image.Image] = []
+    frames_web: list[Image.Image] = []
 
-    print(f"Render {total_frames} frames @ {fps} fps…")
+    print(f"Render {total_frames} frames @ {fps} fps (web = statische bg, alleen cape)…")
     for i in range(total_frames):
         t = i / total_frames
         phase = t * 2.0 * np.pi
         scroll = int(round(t * scroll_px)) % w
 
         bg_slice = tile[:, scroll : scroll + w, :]
-        bg_fast = motion_blur_horizontal(bg_slice, MOTION_BLUR)
-
+        bg_scroll = motion_blur_horizontal(bg_slice, MOTION_BLUR)
         crowd_mask = np.linspace(0.1, 1.0, h)[:, None]
         crowd_mask = np.clip((crowd_mask - 0.3) / 0.7, 0.0, 1.0)[..., None]
-        streak = motion_blur_horizontal(bg_fast, MOTION_BLUR + 10)
-        bg_fast = (
-            bg_fast.astype(np.float32) * (1.0 - crowd_mask * 0.55)
+        streak = motion_blur_horizontal(bg_scroll, MOTION_BLUR + 10)
+        bg_scroll = (
+            bg_scroll.astype(np.float32) * (1.0 - crowd_mask * 0.55)
             + streak.astype(np.float32) * (crowd_mask * 0.55)
         ).astype(np.uint8)
 
-        fg_frame = warp_layer(fg_np.copy(), cape_mask, phase)
-        frame_rgb = composite(fg_frame, bg_fast, base_x, base_y)
-
+        fg_frame = warp_layer(fg_np.copy(), cape_mask, body_mask, phase)
         sharp_fg = fg_frame.copy()
         sharp_fg[:, :, :3] = np.array(
             Image.fromarray(sharp_fg).filter(ImageFilter.UnsharpMask(radius=1.1, percent=95, threshold=2))
         )[:, :, :3]
-        frame_rgb = composite(sharp_fg, frame_rgb, base_x, base_y)
 
-        frames.append(Image.fromarray(frame_rgb, "RGB"))
+        for bg_fast, target in ((bg_scroll, frames), (bg_static, frames_web)):
+            frame_rgb = composite(fg_frame, bg_fast, base_x, base_y)
+            frame_rgb = composite(sharp_fg, frame_rgb, base_x, base_y)
+            target.append(Image.fromarray(frame_rgb, "RGB"))
 
         if (i + 1) % 12 == 0 or i + 1 == total_frames:
             print(f"  frame {i + 1}/{total_frames}")
 
-    return frames
+    return frames, frames_web, subject_box
 
 
-def save_gif(frames: list[Image.Image], output: Path, fps: int) -> None:
+def _gif_palette(frames: list[Image.Image]) -> Image.Image:
+    """Palette uit meerdere frames zodat cape-beweging niet weg-kwantiseert."""
+    w, h = frames[0].size
+    strip = Image.new("RGB", (w * min(6, len(frames)), h))
+    step = max(1, len(frames) // 6)
+    x = 0
+    for i in range(0, len(frames), step):
+        strip.paste(frames[i], (x, 0))
+        x += w
+        if x >= strip.width:
+            break
+    return strip.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+
+
+def save_gif(
+    frames: list[Image.Image],
+    output: Path,
+    fps: int,
+    *,
+    dither: Image.Dither = Image.Dither.FLOYDSTEINBERG,
+    optimize: bool = True,
+) -> None:
     duration_ms = int(round(1000 / fps))
     print(f"Opslaan GIF ({len(frames)} frames, {duration_ms} ms/frame)…")
 
-    palette_img = frames[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-    quantized = [
-        frame.quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
-        for frame in frames
-    ]
+    palette_img = _gif_palette(frames)
+    quantized = [frame.quantize(palette=palette_img, dither=dither) for frame in frames]
 
     quantized[0].save(
         output,
@@ -252,9 +314,13 @@ def save_gif(frames: list[Image.Image], output: Path, fps: int) -> None:
         append_images=quantized[1:],
         duration=duration_ms,
         loop=0,
-        optimize=True,
+        optimize=optimize,
         disposal=2,
     )
+
+
+def crop_subject(frames: list[Image.Image], box: tuple[int, int, int, int]) -> list[Image.Image]:
+    return [f.crop(box) for f in frames]
 
 
 def crop_landscape(frame: Image.Image, ratio: float = 16 / 10) -> Image.Image:
@@ -262,23 +328,41 @@ def crop_landscape(frame: Image.Image, ratio: float = 16 / 10) -> Image.Image:
     target_h = int(w / ratio)
     if target_h >= h:
         return frame
-    top = max(0, (h - target_h) // 2 - int(h * 0.04))
+    top = max(0, (h - target_h) // 2)
     top = min(top, h - target_h)
     return frame.crop((0, top, w, top + target_h))
 
 
-def save_web_gif(frames: list[Image.Image], output: Path, fps: int, width: int) -> None:
-    cropped = [crop_landscape(f) for f in frames]
+def save_web_gif(
+    frames: list[Image.Image],
+    output: Path,
+    fps: int,
+    width: int,
+    subject_box: tuple[int, int, int, int],
+) -> None:
+    # Elke 2e frame = duidelijkere cape-stappen; statische achtergrond
+    web_frames = frames[::2]
+    web_fps = max(12, fps // 2)
+    cropped = crop_subject(web_frames, subject_box)
     h0 = cropped[0].height
     w0 = cropped[0].width
     target_h = int(h0 * width / w0)
     resized = [f.resize((width, target_h), Image.Resampling.LANCZOS) for f in cropped]
     print(f"Opslaan web-GIF ({width}×{target_h}, {len(resized)} frames)…")
-    save_gif(resized, output, fps)
+    duration_ms = int(round(1000 / web_fps))
+    resized[0].save(
+        output,
+        save_all=True,
+        append_images=resized[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bouw MegaMinnie animated GIF")
+    parser = argparse.ArgumentParser(description="Bouw MegaMinnie animated GIF (zijaanzicht)")
     parser.add_argument("--source", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--fps", type=int, default=FPS)
@@ -289,9 +373,11 @@ def main() -> None:
         raise SystemExit(f"Bronbestand niet gevonden: {args.source}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    frames = build_frames(args.source, fps=args.fps, duration_sec=args.duration)
+    frames, frames_web, subject_box = build_frames(
+        args.source, fps=args.fps, duration_sec=args.duration
+    )
     save_gif(frames, args.output, args.fps)
-    save_web_gif(frames, WEB_OUTPUT, args.fps, WEB_WIDTH)
+    save_web_gif(frames_web, WEB_OUTPUT, args.fps, WEB_WIDTH, subject_box)
     size_mb = args.output.stat().st_size / (1024 * 1024)
     web_mb = WEB_OUTPUT.stat().st_size / (1024 * 1024)
     print(f"Klaar: {args.output} ({size_mb:.1f} MB), {WEB_OUTPUT} ({web_mb:.1f} MB)")

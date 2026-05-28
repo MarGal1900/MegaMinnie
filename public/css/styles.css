@@ -1361,6 +1361,18 @@ button[hidden] {
   opacity: 0.7;
 }
 
+.share-report {
+  margin-top: 1rem;
+}
+
+.share-report[hidden] {
+  display: none !important;
+}
+
+.share-report .btn--block {
+  width: 100%;
+}
+
 @media (max-width: 720px) {
   .draft-toolbar__sep {
     display: none;
