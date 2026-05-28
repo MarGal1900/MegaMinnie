@@ -453,6 +453,34 @@ body {
   margin-top: 0.35rem;
 }
 
+/* During MegaMinnie processing: hide input chrome, keep dropzone GIF + steps */
+.panel--input.is-megaminnie-processing .input-hub__actions,
+.panel--input.is-megaminnie-processing .test-recordings,
+.panel--input.is-megaminnie-processing .input-attachments,
+.panel--input.is-megaminnie-processing .input-summary,
+.panel--input.is-megaminnie-processing .audio-review,
+.panel--input.is-megaminnie-processing #hub-process-slot,
+.panel--input.is-megaminnie-processing .process-hint,
+.panel--input.is-megaminnie-processing .input-hub__hint,
+.panel--input.is-megaminnie-processing .input-feedback,
+.panel--input.is-megaminnie-processing #manual-panel,
+.panel--input.is-megaminnie-processing #interview-panel {
+  display: none !important;
+}
+
+.panel--input.is-megaminnie-processing.is-photo-ready .input-hub__drop,
+.panel--input.is-megaminnie-processing .input-hub__drop {
+  display: flex !important;
+}
+
+.panel--input.is-megaminnie-processing.is-photo-ready .input-attachments {
+  display: none !important;
+}
+
+.panel--input.is-megaminnie-processing .input-hub__drop.is-processing {
+  min-height: 220px;
+}
+
 .input-busy {
   position: absolute;
   inset: 0;
@@ -703,6 +731,15 @@ body {
   justify-content: center;
 }
 
+.input-hub__actions .btn--record-compact {
+  border: 1px solid transparent;
+}
+
+.input-hub__actions .btn--record-compact.is-active:not(.is-recording) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(196, 92, 62, 0.12);
+}
+
 .input-hub__hint {
   margin: 0;
   font-size: 0.8rem;
@@ -838,7 +875,6 @@ body {
 .input-hub__actions .btn.is-active {
   background: var(--accent-soft);
   color: var(--accent);
-  border-color: var(--accent);
 }
 
 .btn {
@@ -1655,14 +1691,6 @@ button[hidden] {
 
 .interview__actions .btn--primary {
   flex: 1 1 12rem;
-}
-
-/* --- Vrije gespreksopname --- */
-.input-hub__record-modes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
 }
 
 .btn--mode {

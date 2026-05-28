@@ -192,29 +192,35 @@
           </div>
 
           <div class="input-hub__actions">
-            <button type="button" id="btn-pick-files" class="btn btn--ghost">
+            <button type="button" id="btn-pick-files" class="btn btn--record btn--record-compact btn--mode">
+              <span class="btn__dot" aria-hidden="true"></span>
               Bestanden kiezen
             </button>
-            <div class="input-hub__record-modes" role="group" aria-label="Opnamemodus">
-              <button
-                type="button"
-                id="btn-invoer"
-                class="btn btn--secondary btn--mode"
-                aria-pressed="false"
-              >
-                Vraag &amp; Antwoord
-              </button>
-              <button
-                type="button"
-                id="btn-conversation"
-                class="btn btn--record btn--record-compact btn--mode"
-                aria-pressed="false"
-              >
-                <span class="btn__dot" aria-hidden="true"></span>
-                <span id="conversation-label">Opname gesprek</span>
-              </button>
-            </div>
-            <button type="button" id="btn-manual" class="btn btn--ghost" aria-expanded="false">
+            <button
+              type="button"
+              id="btn-invoer"
+              class="btn btn--record btn--record-compact btn--mode"
+              aria-pressed="false"
+            >
+              <span class="btn__dot" aria-hidden="true"></span>
+              Vraag &amp; Antwoord
+            </button>
+            <button
+              type="button"
+              id="btn-conversation"
+              class="btn btn--record btn--record-compact btn--mode"
+              aria-pressed="false"
+            >
+              <span class="btn__dot" aria-hidden="true"></span>
+              <span id="conversation-label">Opname gesprek</span>
+            </button>
+            <button
+              type="button"
+              id="btn-manual"
+              class="btn btn--record btn--record-compact btn--mode"
+              aria-expanded="false"
+            >
+              <span class="btn__dot" aria-hidden="true"></span>
               Handmatige invoer
             </button>
           </div>
@@ -465,6 +471,6 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=116"></script>
+    <script type="module" src="/js/app.js?v=117"></script>
   </body>
 </html>

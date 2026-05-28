@@ -529,6 +529,7 @@ function cancelRealtimeQaConversation({ fromVoice = false } = {}) {
 }
 
 function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
+  if (!fromVoice) return;
   if (realtimeAutoFinishing) return;
   realtimeAutoFinishing = true;
   if (realtimeFinishCheckTimer) {
@@ -539,7 +540,7 @@ function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
   const completeFinalize = () => {
     const transcript = realtimeController?.consumeTranscript() || lastRealtimeTranscript || "";
     lastRealtimeTranscript = "";
-    stopRealtimeInterview(fromVoice ? "Stopcommando herkend — verwerken…" : "Gestopt");
+    stopRealtimeInterview("Stopcommando herkend — verwerken…");
     resetRecordModeUi();
     setConversationRecordingUi(false);
     updateProcessUi();
@@ -550,17 +551,13 @@ function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
       return;
     }
     realtimeAutoFinishing = false;
-    if (fromVoice) {
-      showFeedback(
-        "Stopcommando gehoord, maar er is nog geen transcript. Klik nogmaals op Vraag & Antwoord om opnieuw te proberen.",
-        "error",
-      );
-      return;
-    }
-    showFeedback("Realtime gesprek gestopt.", "success");
+    showFeedback(
+      "Stopcommando gehoord, maar er is nog geen transcript. Start opnieuw met Vraag & Antwoord.",
+      "error",
+    );
   };
 
-  if (fromVoice && isRealtimeConversationRunning()) {
+  if (isRealtimeConversationRunning()) {
     setRealtimeStatus("Stopcommando herkend — afronden…");
     setTimeout(completeFinalize, 1200);
     return;
@@ -1647,6 +1644,8 @@ function refreshDropzoneProcessingUi() {
   const hubBusy = inputPanel?.classList.contains("is-input-busy");
   const outputBusy = outputPanel?.classList.contains("is-busy");
   const showDropBusy = hubBusy || outputBusy;
+
+  inputPanel?.classList.toggle("is-megaminnie-processing", showDropBusy);
 
   if (showDropBusy && activeProcessingPhase) {
     fileDropzone?.classList.add("is-processing");
@@ -2906,6 +2905,7 @@ function setInputBusy(busy, message, opts = {}) {
     if (message && inputBusyText) inputBusyText.textContent = message;
     inputBusy.hidden = false;
     inputPanel?.classList.add("is-input-busy");
+    updateInputChrome();
     btnProcess.disabled = true;
     if (lockActions) {
       btnPickFiles?.setAttribute("disabled", "");
@@ -3324,8 +3324,14 @@ btnInvoer?.addEventListener("click", (e) => {
   conversationPanelMode = "realtime-qa";
   if (state.interview.active) cancelInterview();
   if (isConversationActive()) cancelConversationRecording();
-  if (isRealtimeConversationRunning() || realtimeController?.isConnecting()) {
-    finalizeRealtimeQaConversation();
+  if (realtimeController?.isConnecting()) {
+    cancelRealtimeQaConversation();
+    return;
+  }
+  if (isRealtimeConversationRunning()) {
+    setConversationStatus(
+      'Zeg "stop" om uit te werken, of "annuleer" om te stoppen zonder verwerking.',
+    );
     return;
   }
   showInterviewPanel(false);
@@ -4351,7 +4357,7 @@ function updateProcessUi() {
           processHint.textContent = "Vraag & Antwoord verbinden…";
         } else if (isRealtimeConversationRunning()) {
           processHint.textContent =
-            "Vraag & Antwoord loopt — zeg “stop” om uit te werken, “annuleer” om te stoppen zonder verwerking, of klik nogmaals op Vraag & Antwoord.";
+            "Vraag & Antwoord loopt — zeg “stop” om uit te werken of “annuleer” om te stoppen zonder verwerking.";
         } else {
           processHint.textContent = "Vraag & Antwoord wordt afgerond…";
         }
