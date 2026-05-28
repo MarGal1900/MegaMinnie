@@ -2,7 +2,7 @@ import { apiPost } from "./api.js";
 
 const OPENAI_REALTIME_WEBRTC_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 const OPENING_PROMPT =
-  "Start nu met je openingsvraag voor dit korte salesgesprek in het Nederlands.";
+  "Begin nu meteen met precies het woord 'Hallo'. Zeg daarna nog niets anders en wacht op antwoord van de gebruiker.";
 const FALLBACK_REALTIME_ERROR = "Realtime sessie kon niet worden gestart.";
 
 function isDebugRuntime() {

@@ -81,6 +81,32 @@ export function detectInterviewCommandAtTail(text) {
   return detectInterviewCommand(n);
 }
 
+const REALTIME_QA_STOP_COMMANDS = new Set(["stop", "stoppen"]);
+const REALTIME_QA_CANCEL_COMMANDS = new Set(["annuleer", "annuleren", "cancel"]);
+
+/** @param {string} text */
+export function isRealtimeQaStopCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (REALTIME_QA_STOP_COMMANDS.has(normalized)) return true;
+  return /\b(stop|stoppen)\b/.test(normalized);
+}
+
+/** @param {string} text */
+export function isRealtimeQaCancelCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (REALTIME_QA_CANCEL_COMMANDS.has(normalized)) return true;
+  return /\b(annuleer|annuleren|cancel)\b/.test(normalized);
+}
+
+/** @returns {"stop"|"cancel"|null} */
+export function detectRealtimeQaVoiceCommand(text) {
+  if (isRealtimeQaCancelCommand(text)) return "cancel";
+  if (isRealtimeQaStopCommand(text)) return "stop";
+  return null;
+}
+
 export function parseAnswerTranscript(text) {
   const original = typeof text === "string" ? text : "";
   const normalized = original.replace(/\s+/g, " ").trim();

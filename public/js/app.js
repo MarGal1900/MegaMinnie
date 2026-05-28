@@ -11,6 +11,7 @@ import {
 import { apiPost, formFields, setApiKey } from "./api.js";
 import {
   detectInterviewCommandAtTail,
+  detectRealtimeQaVoiceCommand,
   parseAnswerTranscript,
 } from "./interview-commands.js";
 import {
@@ -370,10 +371,6 @@ let realtimeAutoFinishing = false;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let realtimeFinishCheckTimer = null;
 
-const REALTIME_FINISH_COMMAND_RE =
-  /\b(stop|stoppen|afronden|rond af|klaar|einde gesprek|einde verslag|verslag klaar)\b/i;
-const REALTIME_FINISH_SHORT_RE = /^(stop|stoppen|afronden|klaar)$/i;
-
 function setInterviewButtonUi(active) {
   btnInvoer?.classList.toggle("is-recording", active);
   btnInvoer?.setAttribute("aria-pressed", active ? "true" : "false");
@@ -480,16 +477,6 @@ async function processRealtimeConversationTranscript(transcript) {
   }
 }
 
-function isRealtimeFinishVoiceCommand(text) {
-  const normalized = String(text || "")
-    .replace(/\s+/g, " ")
-    .replace(/[.!?,;:]+$/g, "")
-    .trim();
-  if (!normalized) return false;
-  if (REALTIME_FINISH_SHORT_RE.test(normalized)) return true;
-  return REALTIME_FINISH_COMMAND_RE.test(normalized);
-}
-
 function extractLastRealtimeUserText(transcript) {
   const lines = String(transcript || "").split("\n");
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -500,13 +487,18 @@ function extractLastRealtimeUserText(transcript) {
   return "";
 }
 
-function maybeAutoFinishRealtimeQa(sourceText) {
+function maybeHandleRealtimeQaVoiceCommand(sourceText) {
   if (conversationPanelMode !== "realtime-qa") return;
   if (!isRealtimeConversationRunning()) return;
   if (realtimeAutoFinishing) return;
   const text = String(sourceText || "").trim();
   if (!text) return;
-  if (isRealtimeFinishVoiceCommand(text)) {
+  const command = detectRealtimeQaVoiceCommand(text);
+  if (command === "cancel") {
+    cancelRealtimeQaConversation({ fromVoice: true });
+    return;
+  }
+  if (command === "stop") {
     finalizeRealtimeQaConversation({ fromVoice: true });
   }
 }
@@ -515,8 +507,25 @@ function scheduleRealtimeFinishCheckFromTranscript(transcript) {
   if (realtimeFinishCheckTimer) clearTimeout(realtimeFinishCheckTimer);
   realtimeFinishCheckTimer = setTimeout(() => {
     realtimeFinishCheckTimer = null;
-    maybeAutoFinishRealtimeQa(extractLastRealtimeUserText(transcript));
+    maybeHandleRealtimeQaVoiceCommand(extractLastRealtimeUserText(transcript));
   }, 350);
+}
+
+function cancelRealtimeQaConversation({ fromVoice = false } = {}) {
+  if (realtimeFinishCheckTimer) {
+    clearTimeout(realtimeFinishCheckTimer);
+    realtimeFinishCheckTimer = null;
+  }
+  realtimeAutoFinishing = false;
+  lastRealtimeTranscript = "";
+  realtimeController?.consumeTranscript?.();
+  stopRealtimeInterview(fromVoice ? "Annuleer — gesprek afgebroken" : "Geannuleerd");
+  resetRecordModeUi();
+  setConversationRecordingUi(false);
+  updateProcessUi();
+  if (fromVoice) {
+    showFeedback("Gesprek geannuleerd.", "success");
+  }
 }
 
 function finalizeRealtimeQaConversation({ fromVoice = false } = {}) {
@@ -3963,7 +3972,6 @@ async function processReport() {
   const loadingMsg = getLoadingMessage(mode);
   updateFlowSteps();
   setInputBusy(true, loadingMsg);
-  if (mode === "text") setProcessingPhase({ phase: null });
   hideFeedback();
 
   try {
@@ -4042,15 +4050,28 @@ async function processReport() {
       applyProgressPct(100);
       result = { ...result, transcript };
     } else {
-      result = await apiPost("/api/visit-report/text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: snapshot.text,
-          source: "voice",
-        }),
-        signal,
+      setProcessingPhase({
+        phase: 1,
+        transcribing: false,
+        progress: 3,
+        message: "MegaMinnie werkt je tekst uit…",
       });
+      result = await runWithProgressTicker(
+        3,
+        98,
+        estimateLlmDurationMs(snapshot.text.length),
+        () =>
+          apiPost("/api/visit-report/text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: snapshot.text,
+              source: "voice",
+            }),
+            signal,
+          }),
+      );
+      applyProgressPct(100);
     }
 
     if (!isRequestActive(requestId)) return;
@@ -4278,7 +4299,7 @@ function getLoadingMessage(mode) {
   if (mode === "voice") {
     return "Bezig met je opname… je ziet hieronder de voortgang.";
   }
-  return "MegaMinnie werkt je tekst uit…";
+  return "Bezig met je tekst… je ziet hieronder de voortgang.";
 }
 
 function cancelResultProcessing() {
@@ -4330,7 +4351,7 @@ function updateProcessUi() {
           processHint.textContent = "Vraag & Antwoord verbinden…";
         } else if (isRealtimeConversationRunning()) {
           processHint.textContent =
-            "Vraag & Antwoord loopt — zeg “stop” of klik nogmaals op Vraag & Antwoord; daarna werkt MegaMinnie automatisch uit.";
+            "Vraag & Antwoord loopt — zeg “stop” om uit te werken, “annuleer” om te stoppen zonder verwerking, of klik nogmaals op Vraag & Antwoord.";
         } else {
           processHint.textContent = "Vraag & Antwoord wordt afgerond…";
         }
@@ -4373,9 +4394,9 @@ function updateProcessUi() {
   }
 
   const preHints = {
-    voice: "Je opname wordt getranscribeerd en uitgewerkt; daarna verdwijnt de invoer.",
+    voice: "",
     photo: "",
-    text: "Je tekst wordt uitgewerkt; daarna verdwijnt de invoer.",
+    text: "",
   };
   processHint.textContent = preHints[mode] ?? "";
   processHint.hidden = !processHint.textContent;
@@ -4911,12 +4932,12 @@ realtimeController = createRealtimeInterviewController({
     if (conversationPanelMode !== "realtime-qa") return;
     if (turn.role !== "user") return;
     if (!isRealtimeConversationRunning()) return;
-    maybeAutoFinishRealtimeQa(turn.text);
+    maybeHandleRealtimeQaVoiceCommand(turn.text);
   },
   onSpeechStopped: ({ pendingUserText, transcript }) => {
     if (conversationPanelMode !== "realtime-qa") return;
     if (!isRealtimeConversationRunning()) return;
-    maybeAutoFinishRealtimeQa(pendingUserText);
+    maybeHandleRealtimeQaVoiceCommand(pendingUserText);
     scheduleRealtimeFinishCheckFromTranscript(transcript);
   },
   onError: (message) => {

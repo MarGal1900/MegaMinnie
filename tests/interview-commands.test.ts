@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   detectInterviewCommand,
   detectInterviewCommandAtTail,
+  detectRealtimeQaVoiceCommand,
   isNextQuestionCommand,
+  isRealtimeQaCancelCommand,
+  isRealtimeQaStopCommand,
   parseAnswerTranscript,
 } from "../public/js/interview-commands.js";
 
@@ -68,6 +71,28 @@ describe("detectInterviewCommandAtTail", () => {
     expect(
       detectInterviewCommandAtTail("Ik denk dat we volgende vraag moeten bespreken"),
     ).toBe(null);
+  });
+});
+
+describe("realtime Q&A voice commands", () => {
+  it("herkent stop voor uitwerking", () => {
+    expect(isRealtimeQaStopCommand("stop")).toBe(true);
+    expect(isRealtimeQaStopCommand("Stop.")).toBe(true);
+    expect(isRealtimeQaStopCommand("Ok, stoppen")).toBe(true);
+    expect(detectRealtimeQaVoiceCommand("stop")).toBe("stop");
+  });
+
+  it("herkent annuleer zonder uitwerking", () => {
+    expect(isRealtimeQaCancelCommand("annuleer")).toBe(true);
+    expect(isRealtimeQaCancelCommand("Annuleren")).toBe(true);
+    expect(isRealtimeQaCancelCommand("cancel")).toBe(true);
+    expect(detectRealtimeQaVoiceCommand("annuleer")).toBe("cancel");
+  });
+
+  it("negeert oude afrond-frasen zonder stop of annuleer", () => {
+    expect(detectRealtimeQaVoiceCommand("klaar")).toBe(null);
+    expect(detectRealtimeQaVoiceCommand("einde verslag")).toBe(null);
+    expect(detectRealtimeQaVoiceCommand("afronden")).toBe(null);
   });
 });
 
