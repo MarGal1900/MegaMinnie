@@ -45,7 +45,7 @@ import { initShareReportEmail } from "./share-report-email.js";
 
 /** Verwerkings-GIF (zelfde asset in prod én test; versie bumpen bij deploy). */
 const MEGAMINNIE_PROCESSING_GIF = "/images/megaminnie-animated-web.gif";
-const MEGAMINNIE_PROCESSING_GIF_VERSION = 17;
+const MEGAMINNIE_PROCESSING_GIF_VERSION = 35;
 
 const state = {
   recording: false,
