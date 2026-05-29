@@ -20,6 +20,11 @@ import {
   processConversationReport,
   transcribeConversationChunk,
 } from "../services/conversation-pipeline.js";
+import { runEmailDraftAgent } from "../agent/email-draft-agent.js";
+import {
+  ConversationAnalysisSchema,
+  type ConversationAnalysis,
+} from "../types/visit-report.js";
 import { prepareImageForApi } from "../lib/image-prepare.js";
 import {
   extractTextFromPhotos,
@@ -392,6 +397,59 @@ visitReportRouter.post("/conversation", rateLimitUploads, async (req, res, next)
     );
 
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** POST /api/visit-report/email-draft — LLM e-mailconcept afgestemd op het gesprek */
+visitReportRouter.post("/email-draft", rateLimitUploads, async (req, res, next) => {
+  try {
+    const body = req.body ?? {};
+    const meetingSubject = getField(body, "meetingSubject");
+    if (!meetingSubject) {
+      res.status(400).json({ error: "Veld 'meetingSubject' is verplicht" });
+      return;
+    }
+
+    const meetingDate = getField(body, "meetingDate");
+    if (!meetingDate) {
+      res.status(400).json({ error: "Veld 'meetingDate' is verplicht" });
+      return;
+    }
+
+    let conversationAnalysis: ConversationAnalysis | undefined;
+    if (body.conversationAnalysis != null) {
+      const parsed = ConversationAnalysisSchema.safeParse(body.conversationAnalysis);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Ongeldige conversationAnalysis",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      conversationAnalysis = parsed.data;
+    }
+
+    const source = body.source;
+    const validSource =
+      source === "voice" ||
+      source === "photo" ||
+      source === "interview" ||
+      source === "conversation"
+        ? source
+        : undefined;
+
+    const draft = await runEmailDraftAgent({
+      meetingSubject,
+      contactName: getField(body, "contactName"),
+      meetingDate,
+      summary: getField(body, "summary"),
+      conversationAnalysis,
+      source: validSource,
+    });
+
+    res.json(draft);
   } catch (err) {
     next(err);
   }

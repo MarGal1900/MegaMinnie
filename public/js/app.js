@@ -33,6 +33,7 @@ import {
 import { createRealtimeInterviewController, REALTIME_QA_OPENING_TEXT } from "./realtime-interview.js";
 import { createOpenAiSpeechPlayback, playOpenAiSpeechOnce, prefetchOpenAiSpeech } from "./openai-speech.js";
 import { initShareReportEmail } from "./share-report-email.js";
+import { initOnboardingTour } from "./onboarding-tour.js";
 
 /** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string; assignee?: string; ownerId?: string }} Task */
 /** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string; location?: string }} Event */
@@ -6127,6 +6128,12 @@ const shareReportEmail = initShareReportEmail({
       contactName: customer?.contactName,
       recipientsInput: customer?.email ?? "",
       mailSignature: state.mailSignature,
+      summary:
+        state.lastResult?.conversationAnalysis?.readableSummary?.trim() ||
+        state.lastResult?.megaMinnie?.summary?.trim() ||
+        undefined,
+      conversationAnalysis: state.lastResult?.conversationAnalysis,
+      source: state.lastResult?.source,
     };
   },
   onFeedback: (message, type) => showFeedback(message, type),
@@ -6271,3 +6278,4 @@ updateOutputVisibility();
 updateSyncButton();
 loadHealth();
 syncProcessingGif(false);
+initOnboardingTour();

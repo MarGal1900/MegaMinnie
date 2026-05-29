@@ -79,6 +79,14 @@ export const ConversationAnalysisSchema = z.object({
 
 export type ConversationAnalysis = z.infer<typeof ConversationAnalysisSchema>;
 
+/** LLM-gegenereerd e-mailconcept (begeleidende tekst, geen volledig verslag). */
+export const EmailDraftSchema = z.object({
+  subject: z.string().min(1).max(200),
+  body: z.string().min(1).max(1200),
+});
+
+export type EmailDraft = z.infer<typeof EmailDraftSchema>;
+
 export interface VisitReportRequest {
   source: VisitReportSource;
   rawText: string;

@@ -12,7 +12,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/css/styles.css?v=85" />
+    <link rel="stylesheet" href="/css/styles.css?v=86" />
   </head>
   <body>
     <div class="app">
@@ -33,15 +33,26 @@
           </div>
         </div>
         <div class="header__status">
-          <button
-            type="button"
-            id="btn-test-mode"
-            class="btn btn--test-mode"
-            aria-pressed="false"
-            title="Testmodus: opnames bewaren voor hergebruik"
-          >
-            Testmodus
-          </button>
+          <div class="header__toolbar">
+            <button
+              type="button"
+              id="btn-tour-help"
+              class="btn--tour-help"
+              title="Rondleiding opnieuw bekijken"
+              aria-label="Rondleiding opnieuw bekijken"
+            >
+              Rondleiding
+            </button>
+            <button
+              type="button"
+              id="btn-test-mode"
+              class="btn btn--test-mode"
+              aria-pressed="false"
+              title="Testmodus: opnames bewaren voor hergebruik"
+            >
+              Testmodus
+            </button>
+          </div>
           <span id="status-badge" class="badge badge--muted">Laden…</span>
         </div>
       </header>
@@ -540,7 +551,7 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=161"></script>
+    <script type="module" src="/js/app.js?v=162"></script>
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {

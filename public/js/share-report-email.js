@@ -1,6 +1,8 @@
 import { buildGespreksverslagDocxBlob } from "./gespreksverslag-docx.bundle.js";
+import { apiPost } from "./api.js";
 
-/** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string; mailSignature?: string }} ShareReportContext */
+/** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string; mailSignature?: string; summary?: string; source?: string; conversationAnalysis?: { topicsDiscussed?: string[]; agreements?: string[]; actionItems?: { who: string; what: string }[]; followUpAppointment?: { scheduled?: boolean; details?: string }; readableSummary?: string } }} ShareReportContext */
+/** @typedef {{ subject: string; body: string }} EmailDraft */
 /** @typedef {"desktop" | "mobile"} OutlookComposeTarget */
 
 /** Outlook-app op iOS/Android (ms-outlook://emails/new?to=…). */
@@ -167,6 +169,52 @@ export function downloadBlobAttachment(filename, blob) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * @param {string} body
+ * @param {string} [signature]
+ * @returns {string}
+ */
+export function appendMailSignature(body, signature) {
+  const trimmedBody = body.trim();
+  const trimmedSignature = signature?.trim();
+  if (!trimmedSignature) return trimmedBody;
+  return `${trimmedBody}\n\n${trimmedSignature}`;
+}
+
+/**
+ * @param {ShareReportContext} ctx
+ * @returns {Promise<EmailDraft | null>}
+ */
+export async function fetchPersonalizedEmailDraft(ctx) {
+  const reportBody = ctx.reportBody?.trim();
+  if (!reportBody) return null;
+
+  const meetingDate =
+    typeof ctx.meetingDate === "string"
+      ? ctx.meetingDate
+      : formatMeetingDateNl(
+          ctx.meetingDate ??
+            extractMeetingDateFromReport(ctx.meetingSubject, reportBody),
+        );
+
+  try {
+    return await apiPost("/api/visit-report/email-draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        meetingSubject: ctx.meetingSubject.trim() || "Meeting",
+        contactName: ctx.contactName?.trim() || undefined,
+        meetingDate,
+        summary: ctx.summary?.trim() || undefined,
+        conversationAnalysis: ctx.conversationAnalysis ?? undefined,
+        source: ctx.source ?? undefined,
+      }),
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -350,7 +398,7 @@ export function getOutlookComposeLengthError(target, urlLength) {
 }
 
 /**
- * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
+ * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget; emailDraft?: EmailDraft }} options
  * @returns {{ ok: true; url: string; recipients: string[]; subject: string; target: OutlookComposeTarget } | { ok: false; error: string }}
  */
 export function prepareShareReportEmail(options) {
@@ -362,15 +410,22 @@ export function prepareShareReportEmail(options) {
   }
 
   const target = options.composeTarget ?? detectOutlookComposeTarget();
-  const subject = buildGespreksverslagMailSubject(options.meetingSubject);
   const meetingDate =
     options.meetingDate ??
     extractMeetingDateFromReport(options.meetingSubject, reportBody);
-  const body = buildGespreksverslagMailBody({
-    contactName: options.contactName,
-    meetingDate,
-    signature: options.mailSignature,
-  });
+
+  const subject =
+    options.emailDraft?.subject?.trim() ||
+    buildGespreksverslagMailSubject(options.meetingSubject);
+  const body = appendMailSignature(
+    options.emailDraft?.body?.trim() ||
+      buildGespreksverslagMailBody({
+        contactName: options.contactName,
+        meetingDate,
+        signature: undefined,
+      }),
+    options.mailSignature,
+  );
   const composeUrl = buildOutlookComposeUrl(recipients, subject, body, target);
   const lengthError = getOutlookComposeLengthError(target, composeUrl.length);
 
@@ -399,11 +454,19 @@ export function resolveReportDateTimeLabel(options) {
 }
 
 /**
- * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
- * @returns {Promise<{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget; filename: string; mailOpened: boolean; composeUrl: string } | { ok: false; error: string }>}
+ * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget; emailDraft?: EmailDraft; usePersonalizedDraft?: boolean }} options
+ * @returns {Promise<{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget; filename: string; mailOpened: boolean; composeUrl: string; personalized: boolean } | { ok: false; error: string }>}
  */
 export async function shareReportViaEmail(options) {
-  const prepared = prepareShareReportEmail(options);
+  let emailDraft = options.emailDraft;
+  let personalized = Boolean(emailDraft);
+
+  if (!emailDraft && options.usePersonalizedDraft !== false) {
+    emailDraft = (await fetchPersonalizedEmailDraft(options)) ?? undefined;
+    personalized = Boolean(emailDraft);
+  }
+
+  const prepared = prepareShareReportEmail({ ...options, emailDraft });
   if (!prepared.ok) return prepared;
 
   const meetingSubject = options.meetingSubject.trim() || "Meeting";
@@ -427,6 +490,7 @@ export async function shareReportViaEmail(options) {
     target: prepared.target,
     filename,
     composeUrl: prepared.url,
+    personalized,
   };
 }
 
@@ -508,6 +572,7 @@ export function initShareReportEmail(deps) {
     }
 
     try {
+      deps.onFeedback?.("E-mail wordt afgestemd op het gesprek…", "success");
       const result = await shareReportViaEmail({
         recipientsInput: ctx.recipientsInput ?? "",
         meetingSubject: ctx.meetingSubject,
@@ -515,6 +580,9 @@ export function initShareReportEmail(deps) {
         meetingDate: ctx.meetingDate,
         contactName: ctx.contactName,
         mailSignature: ctx.mailSignature,
+        summary: ctx.summary,
+        conversationAnalysis: ctx.conversationAnalysis,
+        source: ctx.source,
       });
 
       if (!result.ok) {
@@ -522,10 +590,10 @@ export function initShareReportEmail(deps) {
         return;
       }
 
-      deps.onFeedback?.(
-        formatAttachmentShareSuccessMessage(result.filename),
-        "success",
-      );
+      const message = result.personalized
+        ? `${formatAttachmentShareSuccessMessage(result.filename)} De begeleidende tekst is afgestemd op jullie gesprek.`
+        : formatAttachmentShareSuccessMessage(result.filename);
+      deps.onFeedback?.(message, "success");
     } catch {
       deps.onFeedback?.(
         "Het gespreksverslag kon niet worden aangemaakt. Probeer het opnieuw.",
