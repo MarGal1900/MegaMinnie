@@ -32,6 +32,7 @@ body {
   margin: 0;
   min-height: 100vh;
   min-height: 100dvh;
+  overflow-x: hidden;
   font-family: var(--font);
   color: var(--ink);
   background:
@@ -60,6 +61,8 @@ body {
   display: flex;
   align-items: center;
   gap: 1rem;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .header__avatar-wrap {
@@ -88,12 +91,18 @@ body {
   font-size: 1.75rem;
   font-weight: 600;
   line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header__tagline {
   margin: 0.15rem 0 0;
   font-size: 0.875rem;
   color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header__status {
