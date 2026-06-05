@@ -33,7 +33,7 @@ export function buildConversationUserPrompt(rawText: string, context?: string): 
   if (context?.trim()) {
     parts.push("", "Extra context van sales:", context.trim());
   }
-  parts.push("", `Datum verwerking: ${new Date().toISOString().slice(0, 10)}`);
+  parts.push("", `Datum verwerking: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`);
   return parts.join("\n");
 }
 

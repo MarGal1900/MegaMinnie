@@ -7,11 +7,13 @@ import {
   validateSpeechPrereqs,
 } from "../lib/openai-speech.js";
 import {
+  getListenRealtimeInstructions,
   getOpenAiApiKey,
   getRealtimeInstructions,
   getRealtimeModel,
   getRealtimeTranscriptionModel,
   getRealtimeVoice,
+  getReviewRealtimeInstructions,
   getSupplementRealtimeInstructions,
   isRealtimeInterviewEnabled,
 } from "../lib/realtime-config.js";
@@ -232,6 +234,115 @@ realtimeRouter.post("/session", async (_req, res, next) => {
 
 realtimeRouter.post("/session/supplement", async (_req, res, next) => {
   await handleRealtimeSession(res, next, getSupplementRealtimeInstructions());
+});
+
+realtimeRouter.post("/session/listen", async (_req, res, next) => {
+  try {
+    const apiKey = getOpenAiApiKey();
+    const prereq = validateRealtimeSessionPrereqs({
+      enabled: isRealtimeInterviewEnabled(),
+      apiKey,
+    });
+    if (!prereq.ok) {
+      res.status(prereq.status).json({ error: prereq.error });
+      return;
+    }
+    const model = getRealtimeModel();
+    const voice = getRealtimeVoice();
+    const transcriptionModel = getRealtimeTranscriptionModel();
+    const instructions = getListenRealtimeInstructions();
+    // Luister-sessie: VAD + transcriptie maar geen automatische AI-responses.
+    // Hogere VAD-drempel (0.7) en ruisonderdrukking om TTS-echo te filteren.
+    const payload = {
+      session: {
+        type: "realtime",
+        model,
+        instructions,
+        audio: {
+          input: {
+            turn_detection: {
+              type: "server_vad",
+              create_response: false,
+              threshold: 0.7,
+              silence_duration_ms: 700,
+            },
+            transcription: { model: transcriptionModel, language: "nl" },
+            noise_reduction: { type: "near_field" },
+          },
+          output: { voice },
+        },
+      },
+    };
+    const resp = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!resp.ok) {
+      res.status(resp.status).json({ error: parseRealtimeErrorBody(json) });
+      return;
+    }
+    const parsed = extractClientSecretPayload(json);
+    if (!parsed.secret) {
+      res.status(500).json({ error: "Realtime sessie heeft geen client secret teruggegeven." });
+      return;
+    }
+    res.json({ clientSecret: parsed.secret, expiresAt: parsed.expiresAt, sessionId: parsed.sessionId, model, voice });
+  } catch (err) {
+    next(err);
+  }
+});
+
+realtimeRouter.post("/session/review", async (_req, res, next) => {
+  try {
+    const apiKey = getOpenAiApiKey();
+    const prereq = validateRealtimeSessionPrereqs({
+      enabled: isRealtimeInterviewEnabled(),
+      apiKey,
+    });
+    if (!prereq.ok) {
+      res.status(prereq.status).json({ error: prereq.error });
+      return;
+    }
+    const model = getRealtimeModel();
+    const voice = getRealtimeVoice();
+    const transcriptionModel = getRealtimeTranscriptionModel();
+    const instructions = getReviewRealtimeInstructions();
+    // Review session: VAD but no auto-response — we trigger each chunk manually.
+    const payload = {
+      session: {
+        type: "realtime",
+        model,
+        instructions,
+        audio: {
+          input: {
+            turn_detection: { type: "server_vad", create_response: false },
+            transcription: { model: transcriptionModel, language: "nl" },
+          },
+          output: { voice },
+        },
+      },
+    };
+    const resp = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!resp.ok) {
+      res.status(resp.status).json({ error: parseRealtimeErrorBody(json) });
+      return;
+    }
+    const parsed = extractClientSecretPayload(json);
+    if (!parsed.secret) {
+      res.status(500).json({ error: "Realtime sessie heeft geen client secret teruggegeven." });
+      return;
+    }
+    res.json({ clientSecret: parsed.secret, expiresAt: parsed.expiresAt, sessionId: parsed.sessionId, model, voice });
+  } catch (err) {
+    next(err);
+  }
 });
 
 realtimeRouter.post("/speech", async (req, res, next) => {

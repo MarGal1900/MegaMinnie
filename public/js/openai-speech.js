@@ -259,10 +259,12 @@ export function createOpenAiSpeechPlayback(options = {}) {
         audio = new Audio(blobUrl);
         void playAudioElement(audio)
           .then(() => {
+            if (generation !== playGeneration) return;
             cleanupAudio();
             finishPlayOne();
           })
           .catch((err) => {
+            if (generation !== playGeneration) return;
             cleanupAudio();
             failPlayOne(err);
           });

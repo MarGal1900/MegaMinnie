@@ -39,6 +39,7 @@
             class="btn btn--test-mode"
             aria-pressed="false"
             title="Testmodus: opnames bewaren voor hergebruik"
+            data-tour="btn-test-mode"
           >
             Testmodus
           </button>
@@ -48,6 +49,9 @@
 
       <div id="test-mode-banner" class="test-mode-banner" hidden role="status">
         Testmodus
+        <button type="button" id="btn-tour-reset" class="btn btn--ghost btn--tiny">
+          Rondleiding opnieuw
+        </button>
       </div>
 
       <nav
@@ -55,6 +59,7 @@
         id="flow-steps"
         aria-label="Voortgang in MegaMinnie"
         style="--progress: 0%"
+        data-tour="flow-steps"
       >
         <ol class="workflow-timeline__list">
           <li class="workflow-timeline__step" data-step="1">
@@ -139,7 +144,7 @@
                 Stoppen
               </button>
             </div>
-            <label class="input-hub__drop" id="file-dropzone">
+            <label class="input-hub__drop" id="file-dropzone" data-tour="file-dropzone">
               <input
                 type="file"
                 id="file-input"
@@ -199,6 +204,7 @@
               id="btn-conversation"
               class="btn btn--record btn--record-compact btn--mode"
               aria-pressed="false"
+              data-tour="btn-conversation"
             >
               <span class="btn__dot" aria-hidden="true"></span>
               <span id="conversation-label">Opname gesprek</span>
@@ -208,6 +214,7 @@
               id="btn-invoer"
               class="btn btn--record btn--record-compact btn--mode"
               aria-pressed="false"
+              data-tour="btn-invoer"
             >
               <span class="btn__dot" aria-hidden="true"></span>
               Vraag &amp; Antwoord
@@ -217,6 +224,7 @@
               id="btn-manual"
               class="btn btn--record btn--record-compact btn--mode"
               aria-expanded="false"
+              data-tour="btn-manual"
             >
               <span class="btn__dot" aria-hidden="true"></span>
               Handmatige invoer
@@ -278,7 +286,7 @@
           </div>
 
           <div id="hub-process-slot" class="process-area">
-            <button type="button" id="btn-process" class="btn btn--primary btn--block" disabled>
+            <button type="button" id="btn-process" class="btn btn--primary btn--block" disabled data-tour="btn-process">
               Zet MegaMinnie aan het werk
             </button>
             <p id="process-hint" class="process-hint" hidden></p>

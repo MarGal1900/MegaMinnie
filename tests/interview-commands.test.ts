@@ -109,15 +109,81 @@ describe("review playback voice commands", () => {
     expect(detectReviewVoiceCommand("Voor lezen")).toBe("voorlezen");
   });
 
+  it("herkent stop tijdens voorlezen", () => {
+    expect(detectReviewVoiceCommand("stop")).toBe("stop");
+    expect(detectReviewVoiceCommand("Stop.")).toBe("stop");
+    expect(detectReviewVoiceCommand("stoppen")).toBe("stop");
+  });
+
   it("negeert inhoudelijke zinnen", () => {
     expect(detectReviewVoiceCommand("de correctie staat in alinea twee")).toBe(null);
     expect(detectReviewVoiceCommand("kunnen we dit voorlezen aan de klant")).toBe(null);
+    expect(detectReviewVoiceCommand("we moeten hier stoppen met de werkzaamheden")).toBe(null);
   });
 
   it("strippt commando uit correctietekst", () => {
     expect(stripReviewVoiceCommand("Correctie. De datum moet morgen zijn.")).toBe(
       "De datum moet morgen zijn.",
     );
+  });
+
+  // Regressietest: "Correctie" moet herkend blijven terwijl TTS spreekt.
+  // handleReviewInlineSpeechStarted keert vroegtijdig terug bij ttsActive=true
+  // (geen auto-interrupt), maar onSpeechStopped stuurt het transcript alsnog
+  // door detectReviewVoiceCommand — die moet "correctie" blijven retourneren.
+  it("herkent correctie ook met extra witruimte en leestekens", () => {
+    expect(detectReviewVoiceCommand("  Correctie!  ")).toBe("correctie");
+    expect(detectReviewVoiceCommand("correctie,")).toBe("correctie");
+    expect(detectReviewVoiceCommand("CORRECTIE")).toBe("correctie");
+  });
+
+  it("herkent correctie gevolgd door inhoud als correctie-commando", () => {
+    expect(detectReviewVoiceCommand("Correctie de naam is Jan Jansen")).toBe("correctie");
+    expect(detectReviewVoiceCommand("correctie het bedrag is vijfhonderd euro")).toBe("correctie");
+  });
+
+  it("strippt correctie-prefix zodat alleen de correctietekst overblijft", () => {
+    expect(stripReviewVoiceCommand("Correctie de naam is Jan Jansen")).toBe(
+      "de naam is Jan Jansen",
+    );
+    expect(stripReviewVoiceCommand("Correctie. het bedrag is vijfhonderd euro")).toBe(
+      "het bedrag is vijfhonderd euro",
+    );
+  });
+
+  // Regressietest: correctie zonder extra tekst → detectReviewVoiceCommand returnt "correctie",
+  // maar stripReviewVoiceCommand levert een lege string op.
+  // maybeHandleReviewVoiceCommand moet in dit geval false teruggeven als active al true is,
+  // zodat handleReviewInlineSpeechStopped de resume-timer niet blokkeert.
+  it("correctie zonder tekst levert lege remainder op na strippen", () => {
+    expect(stripReviewVoiceCommand("Correctie")).toBe("");
+    expect(stripReviewVoiceCommand("Correctie.")).toBe("");
+    expect(stripReviewVoiceCommand("CORRECTIE!")).toBe("");
+  });
+
+  // Regressietest: correctie moet herkend worden als het eerste woord in het transcript
+  // is, ook als er ruis of witruimte voor staat — zo werkt onSpeechStopped na stilte.
+  it("herkent correctie-commando ongeacht leading/trailing witruimte en varianten", () => {
+    expect(detectReviewVoiceCommand("  correctie  ")).toBe("correctie");
+    expect(detectReviewVoiceCommand("Correctie!")).toBe("correctie");
+    expect(detectReviewVoiceCommand("Correctie,")).toBe("correctie");
+    // Ingebed in een zin: GEEN commando
+    expect(detectReviewVoiceCommand("Maak een correctie in alinea twee")).toBe(null);
+    expect(detectReviewVoiceCommand("Er is een correctie nodig")).toBe(null);
+  });
+
+  // Regressietest: remainder na strippen van "Correctie" + correctietekst moet de correctietekst
+  // opleveren zodat appendInlineCorrectionSegment de juiste inhoud ontvangt.
+  it("strippt correctie-commando correct zodat de correctietekst overblijft", () => {
+    expect(stripReviewVoiceCommand("Correctie het telefoonnummer is 06-12345678")).toBe(
+      "het telefoonnummer is 06-12345678",
+    );
+    expect(stripReviewVoiceCommand("Correctie. De vergadering is op dinsdag.")).toBe(
+      "De vergadering is op dinsdag.",
+    );
+    // Standalone → lege remainder (activestatuscheck in maybeHandleReviewVoiceCommand)
+    expect(stripReviewVoiceCommand("Correctie")).toBe("");
+    expect(stripReviewVoiceCommand("Correctie.")).toBe("");
   });
 });
 

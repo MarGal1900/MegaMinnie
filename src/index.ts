@@ -27,6 +27,11 @@ const publicDir = path.join(process.cwd(), "public");
 
 app.use(express.json({ limit: "2mb" }));
 
+app.use((_req, res, next) => {
+  res.setHeader("Permissions-Policy", "microphone=(self), camera=(self)");
+  next();
+});
+
 app.use("/api", (_req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();

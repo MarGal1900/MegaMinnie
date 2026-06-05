@@ -4,6 +4,14 @@
  */
 
 import { apiPost, formFields } from "./api.js";
+import {
+  alertMicrophoneError,
+  buildMicrophoneConstraints,
+  isMicrophoneApiAvailable,
+  pickSupportedAudioMimeType,
+  requestMicrophoneStream,
+  resumeAudioContext,
+} from "./media-permissions.js";
 
 /** Ruimte onder 25 MB multer-limiet. */
 const MAX_CHUNK_BYTES = 24 * 1024 * 1024;
@@ -93,6 +101,7 @@ function startLevelMonitor(stream) {
   stopLevelMonitor();
   try {
     const ctx = new AudioContext();
+    void resumeAudioContext(ctx);
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
@@ -162,12 +171,8 @@ function finalizeCurrentSegment() {
 
 /** @param {MediaStream} stream */
 function createRecorder(stream) {
-  const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-    ? "audio/webm"
-    : MediaRecorder.isTypeSupported("audio/mp4")
-      ? "audio/mp4"
-      : "";
-  conversationState.mimeType = mimeType || "audio/webm";
+  const mimeType = pickSupportedAudioMimeType();
+  conversationState.mimeType = mimeType || "audio/mp4";
   const recorder = mimeType
     ? new MediaRecorder(stream, { mimeType })
     : new MediaRecorder(stream);
@@ -225,10 +230,8 @@ async function rolloverSegment() {
 /** Start vrije gespreksopname direct (microfoon + opname). */
 export async function startConversationRecording() {
   if (conversationState.phase === "recording" || conversationState.phase === "processing") return;
-  if (!navigator.mediaDevices?.getUserMedia) {
-    alert(
-      "Opnemen werkt alleen via https:// of http://localhost. Open MegaMinnie lokaal of op een beveiligde verbinding.",
-    );
+  if (!isMicrophoneApiAvailable()) {
+    alertMicrophoneError(new DOMException("", "SecurityError"), { feature: "Gespreksopname" });
     return;
   }
 
@@ -245,20 +248,9 @@ export async function beginConversationCapture() {
   const deps = getDeps();
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    stream = await requestMicrophoneStream(buildMicrophoneConstraints());
   } catch (err) {
-    const denied = err instanceof DOMException && err.name === "NotAllowedError";
-    alert(
-      denied
-        ? "Microfoon geweigerd. Sta toegang toe in de browser-instellingen en probeer opnieuw."
-        : "Microfoon niet beschikbaar. Controleer je apparaat of probeer een andere browser.",
-    );
+    alertMicrophoneError(err, { feature: "Gespreksopname" });
     return;
   }
 

@@ -2671,3 +2671,97 @@ button[hidden] {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* === Onboarding tour === */
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+}
+
+.onboarding-spotlight {
+  position: fixed;
+  border-radius: var(--radius);
+  /* Large outer shadow creates the dark overlay; the element itself stays transparent */
+  box-shadow: 0 0 0 9999px rgba(26, 35, 50, 0.72);
+  pointer-events: none;
+  z-index: 9001;
+  transition:
+    top 0.22s ease,
+    left 0.22s ease,
+    width 0.22s ease,
+    height 0.22s ease;
+}
+
+.onboarding-tooltip {
+  position: fixed;
+  z-index: 9002;
+  width: min(22rem, calc(100vw - 2rem));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.25rem 1rem;
+  box-shadow:
+    0 4px 16px rgba(26, 35, 50, 0.12),
+    0 1px 4px rgba(26, 35, 50, 0.08);
+  pointer-events: all;
+  transition:
+    top 0.2s ease,
+    left 0.2s ease;
+  animation: onboarding-fade-in 0.18s ease;
+}
+
+@keyframes onboarding-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.onboarding-tooltip__counter {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 0.4rem;
+}
+
+.onboarding-tooltip__title {
+  font-family: var(--font);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.5rem;
+  line-height: 1.3;
+}
+
+.onboarding-tooltip__body {
+  font-size: 0.88rem;
+  color: var(--ink-muted);
+  line-height: 1.6;
+  margin: 0 0 1rem;
+}
+
+.onboarding-tooltip__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.onboarding-tooltip__nav {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* Ensure the onboarding overlay is always on top of the loading spinner */
+.onboarding-overlay {
+  z-index: 9000;
+}

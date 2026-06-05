@@ -1,6 +1,17 @@
+const CYRILLIC_TO_LATIN = {
+  "стоп": "stop",
+  "аннулируй": "annuleer",
+  "аннулирую": "annuleer",
+  "следующий": "volgende",
+  "готово": "einde verslag",
+};
+
 export function normalizeCommandText(text) {
-  return text
-    .toLowerCase()
+  let t = text.toLowerCase().trim();
+  for (const [cyr, lat] of Object.entries(CYRILLIC_TO_LATIN)) {
+    t = t.replace(new RegExp(cyr, "g"), lat);
+  }
+  return t
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
@@ -109,6 +120,15 @@ export function detectRealtimeQaVoiceCommand(text) {
 
 const REVIEW_CORRECTIE_COMMANDS = new Set(["correctie"]);
 const REVIEW_VOORLEZEN_COMMANDS = new Set(["voorlezen", "voor lezen"]);
+const REVIEW_STOP_COMMANDS = new Set(["stop", "stoppen"]);
+
+/** @param {string} text */
+export function isReviewStopCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (REVIEW_STOP_COMMANDS.has(normalized)) return true;
+  return /^(stop|stoppen)[.!?,;:]*$/.test(normalized);
+}
 
 /** @param {string} text */
 export function isReviewCorrectieCommand(text) {
@@ -133,11 +153,12 @@ export function startsWithReviewCorrectieCommand(text) {
   return /^correctie\b[.!?,;:]*\s+\S/.test(normalized);
 }
 
-/** @returns {"correctie"|"voorlezen"|null} */
+/** @returns {"correctie"|"voorlezen"|"stop"|null} */
 export function detectReviewVoiceCommand(text) {
   if (isReviewVoorlezenCommand(text)) return "voorlezen";
   if (isReviewCorrectieCommand(text)) return "correctie";
   if (startsWithReviewCorrectieCommand(text)) return "correctie";
+  if (isReviewStopCommand(text)) return "stop";
   return null;
 }
 

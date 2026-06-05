@@ -143,7 +143,7 @@ export async function transcribeAudio(
   const model = useDiarize ? "gpt-4o-transcribe-diarize" : getWhisperModel();
   const file = await toFile(buffer, filename, { type: mimeType });
   const whisperPrompt = useDiarize
-    ? options.prompt?.trim() || undefined
+    ? undefined
     : buildWhisperPrompt({
         domain: options.useDomainPrompt !== false,
         extra: options.prompt,

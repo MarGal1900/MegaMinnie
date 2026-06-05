@@ -1,4 +1,10 @@
 import { apiPost } from "./api.js";
+import {
+  alertMicrophoneError,
+  buildMicrophoneConstraints,
+  requestMicrophoneStream,
+  stopMediaStream,
+} from "./media-permissions.js";
 
 const OPENAI_REALTIME_WEBRTC_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 export const REALTIME_QA_OPENING_TEXT = "Hallo";
@@ -123,6 +129,9 @@ export function buildLiveRealtimeTranscript(turns, pendingUser = "", pendingAssi
  *   onTranscriptUpdate?: (transcript: string) => void;
  *   onTurn?: (turn: { role: "assistant"|"user"; text: string }) => void;
  *   onSpeechStopped?: (context: { pendingUserText: string; transcript: string }) => void;
+ *   onSpeechStoppedEarly?: () => void;
+ *   onResponseStarted?: () => void;
+ *   onResponseDone?: () => void;
  *   sessionUrl?: string;
  *   listenOnly?: boolean;
  *   correctionDialogue?: boolean;
@@ -161,6 +170,8 @@ export function createRealtimeInterviewController(options) {
   let connecting = false;
   let openingGreetingSent = false;
   let dataChannelReady = false;
+  /** @type {object | null} Queued speakText payload — verstuurd zodra data channel opent. */
+  let pendingSpeakPayload = null;
   let remoteTrackReady = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let openingGreetingFallbackTimer = null;
@@ -227,6 +238,7 @@ export function createRealtimeInterviewController(options) {
     openingGreetingSent = false;
     dataChannelReady = false;
     remoteTrackReady = false;
+    pendingSpeakPayload = null;
     if (openingGreetingFallbackTimer) {
       clearTimeout(openingGreetingFallbackTimer);
       openingGreetingFallbackTimer = null;
@@ -462,11 +474,12 @@ export function createRealtimeInterviewController(options) {
       return;
     }
     if (type === "input_audio_buffer.speech_stopped") {
+      options.onSpeechStoppedEarly?.();
       scheduleSpeechStopped();
     }
   };
 
-  const handleDataEvent = (eventType) => {
+  const handleDataEvent = (eventType, payload = {}) => {
     if (!eventType) return;
     if (eventType === "input_audio_buffer.speech_started") {
       pendingUserTranscript = "";
@@ -481,6 +494,7 @@ export function createRealtimeInterviewController(options) {
     if (eventType === "response.created") {
       pendingAssistantTranscript = "";
       setStatus("Assistent antwoordt…");
+      options.onResponseStarted?.();
       return;
     }
     if (
@@ -494,6 +508,10 @@ export function createRealtimeInterviewController(options) {
       pendingAssistantTranscript = "";
       setStatus("Luistert…");
       emitTranscript();
+      const status = typeof payload?.response?.status === "string" ? payload.response.status : "";
+      if (status !== "cancelled" && status !== "incomplete") {
+        options.onResponseDone?.();
+      }
     }
   };
 
@@ -503,6 +521,10 @@ export function createRealtimeInterviewController(options) {
     dataChannel.addEventListener("open", () => {
       emitDebug("Data channel open");
       dataChannelReady = true;
+      if (pendingSpeakPayload) {
+        dataChannel.send(JSON.stringify(pendingSpeakPayload));
+        pendingSpeakPayload = null;
+      }
       if (listenOnly) {
         if (!passiveListen) {
           setStatus("Spreek je correctie in…");
@@ -519,7 +541,7 @@ export function createRealtimeInterviewController(options) {
         if (type) {
           emitDebug(`Realtime event: ${type}`);
           handleTranscriptionSideEffects(type, payload);
-          handleDataEvent(type);
+          handleDataEvent(type, payload);
           const extractedTurns = extractTurnsFromPayload(payload);
           for (const turn of extractedTurns) {
             addTurn(turn.role, turn.text);
@@ -575,15 +597,13 @@ export function createRealtimeInterviewController(options) {
     setupDataChannel();
   };
 
-  const connectWebRtc = async (session) => {
+  const connectWebRtc = async (session, prefetchedStream) => {
     if (!peer) throw new Error("Geen peer connection beschikbaar.");
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    if (prefetchedStream) {
+      localStream = prefetchedStream;
+    } else if (!localStream) {
+      localStream = await requestMicrophoneStream(buildMicrophoneConstraints());
+    }
     localStream.getTracks().forEach((track) => {
       peer?.addTrack(track, localStream);
     });
@@ -629,6 +649,9 @@ export function createRealtimeInterviewController(options) {
     correctionDialogue = startOverrides.correctionDialogue ?? defaultCorrectionDialogue;
     passiveListen = startOverrides.passiveListen ?? defaultPassiveListen;
     skipOpeningGreeting = startOverrides.skipOpeningGreeting === true;
+    /** @type {MediaStream | null | undefined} */
+    const prefetchedStream = startOverrides.prefetchedStream ?? null;
+    let ownedPrefetchedStream = false;
     resetOpeningGreetingState();
     turns = [];
     emitTranscript();
@@ -637,6 +660,13 @@ export function createRealtimeInterviewController(options) {
       setStatus("Verbinden…");
     }
     try {
+      if (prefetchedStream) {
+        localStream = prefetchedStream;
+      } else {
+        localStream = await requestMicrophoneStream(buildMicrophoneConstraints());
+        ownedPrefetchedStream = true;
+      }
+
       const session = await apiPost(sessionUrl, {
         method: "POST",
       });
@@ -645,7 +675,7 @@ export function createRealtimeInterviewController(options) {
         throw new Error("Realtime sessie gaf geen client secret terug.");
       }
       setupPeer();
-      await connectWebRtc(session);
+      await connectWebRtc(session, prefetchedStream || localStream);
       updateState({ active: true, connecting: false });
       if (!passiveListen) {
         setStatus(
@@ -657,11 +687,24 @@ export function createRealtimeInterviewController(options) {
         );
       }
     } catch (err) {
+      if (ownedPrefetchedStream) {
+        stopMediaStream(localStream);
+        localStream = null;
+      }
       cleanup();
       updateState({ active: false, connecting: false });
       setStatus("Fout bij realtime sessie");
       if (isDebugRuntime()) {
         console.debug("Realtime start failed", err);
+      }
+      if (
+        err instanceof DOMException &&
+        (err.name === "NotAllowedError" ||
+          err.name === "PermissionDeniedError" ||
+          err.name === "SecurityError")
+      ) {
+        alertMicrophoneError(err, { feature: "Vraag & Antwoord (realtime)" });
+        return false;
       }
       const message = toFriendlyRealtimeError(err, FALLBACK_REALTIME_ERROR);
       options.onError?.(message);
@@ -694,6 +737,13 @@ export function createRealtimeInterviewController(options) {
     pendingAssistantTranscript = "";
     emitTranscript();
     return transcript;
+  };
+
+  const clearTranscript = () => {
+    turns = [];
+    pendingUserTranscript = "";
+    pendingAssistantTranscript = "";
+    emitTranscript();
   };
 
   const beginCorrectionDialogue = () => {
@@ -748,11 +798,45 @@ export function createRealtimeInterviewController(options) {
     addTurn("assistant", text);
   };
 
+  /** Stuur tekst naar het model om voor te lezen via response.create.
+   *  Als het data channel nog niet open is, wordt het queued en verstuurd bij opening. */
+  const speakText = (text) => {
+    if (!dataChannel) return false;
+    const payload = {
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: String(text || "").trim() }],
+          },
+        ],
+      },
+    };
+    if (dataChannel.readyState === "open") {
+      dataChannel.send(JSON.stringify(payload));
+    } else {
+      pendingSpeakPayload = payload;
+    }
+    return true;
+  };
+
+  /** Annuleer de lopende model-response en verwijder eventuele queued payload. */
+  const cancelResponse = () => {
+    pendingSpeakPayload = null;
+    if (!dataChannel || dataChannel.readyState !== "open") return false;
+    dataChannel.send(JSON.stringify({ type: "response.cancel" }));
+    return true;
+  };
+
   return {
     start,
     stop,
     consumeTranscript,
     consumeUserTranscript,
+    clearTranscript,
     beginCorrectionDialogue,
     endCorrectionDialogue,
     setMicEnabled,
@@ -762,5 +846,7 @@ export function createRealtimeInterviewController(options) {
     getUserTranscript: () => buildUserTranscript(),
     isActive: () => active,
     isConnecting: () => connecting,
+    speakText,
+    cancelResponse,
   };
 }

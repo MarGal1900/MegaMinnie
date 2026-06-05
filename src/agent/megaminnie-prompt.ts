@@ -58,7 +58,7 @@ Verplicht schema:
 export function buildUserPrompt(
   rawText: string,
   context?: string,
-  source?: "voice" | "photo" | "interview" | "conversation",
+  source?: "voice" | "photo" | "interview" | "conversation" | "correction",
 ): string {
   const intro =
     source === "conversation"
@@ -75,7 +75,7 @@ export function buildUserPrompt(
   if (context?.trim()) {
     parts.push("", "Extra context van sales:", context.trim());
   }
-  parts.push("", `Datum verwerking: ${new Date().toISOString().slice(0, 10)}`);
+  parts.push("", `Datum verwerking: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`);
   return parts.join("\n");
 }
 
@@ -87,8 +87,39 @@ export function buildExtendUserPrompt(
     events: { subject: string; startDateTime: string; endDateTime: string }[];
   },
   supplementRawText: string,
-  supplementSource: "voice" | "photo" | "interview" | "conversation",
+  supplementSource: "voice" | "photo" | "interview" | "conversation" | "correction",
 ): string {
+  if (supplementSource === "correction") {
+    // Gesproken correctie-instructie: pas alleen de specifieke aanpassing toe, voeg niets toe.
+    return [
+      "Je past een BESTAAND bezoekverslag aan op basis van een gesproken correctie-instructie.",
+      "STRIKTE REGELS:",
+      "- Voer ALLEEN de specifieke correctie uit die in de instructie staat.",
+      "- Voeg GEEN nieuwe zinnen, alinea's of informatie toe aan het verslag.",
+      "- Schrijf NIET 'de datum werd gecorrigeerd' of soortgelijke metabeschrijvingen.",
+      "- Verander alleen het betreffende veld of de betreffende waarde — niets meer.",
+      "- Laat alle andere tekst ongewijzigd.",
+      "",
+      "--- BESTAAND VERSLAG (titel + body) ---",
+      `Titel: ${existing.title}`,
+      "",
+      existing.body.trim(),
+      "--- EINDE BESTAAND VERSLAG ---",
+      "",
+      "--- CORRECTIE-INSTRUCTIE (gesproken door gebruiker) ---",
+      supplementRawText.trim(),
+      "--- EINDE INSTRUCTIE ---",
+      "",
+      "Bestaande taken (JSON):",
+      JSON.stringify(existing.tasks, null, 2),
+      "",
+      "Bestaande agenda-items (JSON):",
+      JSON.stringify(existing.events, null, 2),
+      "",
+      `Datum: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
+    ].join("\n");
+  }
+
   const supplementLabel =
     supplementSource === "voice" || supplementSource === "conversation"
       ? "TRANSCRIPT van een extra gesproken opname"
@@ -119,6 +150,6 @@ export function buildExtendUserPrompt(
     "Bestaande agenda-items (JSON):",
     JSON.stringify(existing.events, null, 2),
     "",
-    `Datum bijwerking: ${new Date().toISOString().slice(0, 10)}`,
+    `Datum bijwerking: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
   ].join("\n");
 }
