@@ -13,6 +13,22 @@ describe("vercel.json structuur", () => {
     expect(Array.isArray(config.headers)).toBe(true);
   });
 
+  it("heeft een functions-configuratie voor api/index.js met includeFiles", () => {
+    expect(config).toHaveProperty("functions");
+    expect(config.functions).toHaveProperty("api/index.js");
+    expect(config.functions["api/index.js"].includeFiles).toContain("dist/**");
+    expect(config.functions["api/index.js"].includeFiles).toContain("public/**");
+  });
+
+  it("heeft een rewrite die alle requests naar /api/index stuurt", () => {
+    expect(Array.isArray(config.rewrites)).toBe(true);
+    const rewrite = config.rewrites.find(
+      (r: { source: string }) => r.source === "/(.*)",
+    );
+    expect(rewrite).toBeDefined();
+    expect(rewrite.destination).toBe("/api/index");
+  });
+
   it("bevat een Cache-Control: no-cache regel voor /sw.js", () => {
     const rule = config.headers.find(
       (r: { source: string }) => r.source === "/sw.js",
