@@ -1,4 +1,4 @@
-const CACHE_NAME = "megaminnie-cache-v14";
+const CACHE_NAME = "megaminnie-cache-v15";
 
 const PRECACHE_URLS = [
   "/",
