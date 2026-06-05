@@ -3411,7 +3411,20 @@ async function startInterview() {
   await presentInterviewStep();
 }
 
+function isPwaMode() {
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches
+  );
+}
+
 function updateTestModeUi() {
+  if (isPwaMode()) {
+    if (btnTestMode) btnTestMode.hidden = true;
+    if (testModeBanner) testModeBanner.hidden = true;
+    if (testRecordingsSection) testRecordingsSection.hidden = true;
+    return;
+  }
   if (testModeBanner) testModeBanner.hidden = !state.keepInput;
   if (testRecordingsSection) testRecordingsSection.hidden = !state.keepInput;
   if (btnTestMode) {
@@ -3451,6 +3464,11 @@ async function applyTestMode(enabled) {
 }
 
 function initTestModePreference() {
+  if (isPwaMode()) {
+    state.keepInput = false;
+    updateTestModeUi();
+    return;
+  }
   const stored = localStorage.getItem(TEST_MODE_STORAGE_KEY);
   if (stored === "true" || stored === "false") {
     state.keepInput = stored === "true";
