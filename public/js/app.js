@@ -3412,10 +3412,11 @@ async function startInterview() {
 }
 
 function isPwaMode() {
-  return (
-    window.matchMedia("(display-mode: standalone)").matches ||
-    window.matchMedia("(display-mode: fullscreen)").matches
-  );
+  if (new URLSearchParams(window.location.search).has("pwa")) return true;
+  if (window.navigator.standalone === true) return true;
+  if (window.matchMedia("(display-mode: standalone)").matches) return true;
+  if (window.matchMedia("(display-mode: fullscreen)").matches) return true;
+  return false;
 }
 
 function updateTestModeUi() {
@@ -6377,3 +6378,9 @@ const onboardingTour = new OnboardingTour();
 $("btn-tour-reset")?.addEventListener("click", () => onboardingTour.restart());
 loadHealth().finally(() => onboardingTour.start());
 syncProcessingGif(false);
+
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  if (event.data?.type !== "SW_UPDATED") return;
+  const isBusy = state.processing || state.recording || state.interview?.active;
+  if (!isBusy) window.location.reload();
+});

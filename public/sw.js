@@ -1,4 +1,4 @@
-const CACHE_NAME = "megaminnie-cache-v16";
+const CACHE_NAME = "megaminnie-cache-v17";
 
 const PRECACHE_URLS = [
   "/",
@@ -37,6 +37,11 @@ self.addEventListener("activate", (event) => {
     ),
   );
   self.clients.claim();
+  self.clients
+    .matchAll({ type: "window", includeUncontrolled: true })
+    .then((clients) =>
+      clients.forEach((client) => client.postMessage({ type: "SW_UPDATED" })),
+    );
 });
 
 self.addEventListener("fetch", (event) => {

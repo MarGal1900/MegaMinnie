@@ -1,7 +1,7 @@
 {
   "name": "MegaMinnie Gespreksverslag Tool",
   "short_name": "MegaMinnie",
-  "start_url": ".",
+  "start_url": "./?pwa=1",
   "display": "standalone",
   "background_color": "#1e1e1e",
   "theme_color": "#0e639c",
