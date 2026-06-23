@@ -153,11 +153,25 @@ export function startsWithReviewCorrectieCommand(text) {
   return /^correctie\b[.!?,;:]*\s+\S/.test(normalized);
 }
 
+/**
+ * Detecteert "Correctie" aan het EINDE van een uiting, bijv. wanneer de Realtime API de
+ * TTS-echo en de gebruikersstem samenvoegt: "De naam is Jan Jansen. Correctie."
+ * Vereist minimaal één woord vóór "Correctie" om pure commando's (al gevangen door
+ * isReviewCorrectieCommand) niet dubbel te detecteren.
+ * @param {string} text
+ */
+export function endsWithReviewCorrectieCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /\S\s+correctie[.!?,;:]*$/.test(normalized);
+}
+
 /** @returns {"correctie"|"voorlezen"|"stop"|null} */
 export function detectReviewVoiceCommand(text) {
   if (isReviewVoorlezenCommand(text)) return "voorlezen";
   if (isReviewCorrectieCommand(text)) return "correctie";
   if (startsWithReviewCorrectieCommand(text)) return "correctie";
+  if (endsWithReviewCorrectieCommand(text)) return "correctie";
   if (isReviewStopCommand(text)) return "stop";
   return null;
 }

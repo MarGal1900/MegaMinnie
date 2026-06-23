@@ -13,6 +13,7 @@ import {
   detectInterviewCommandAtTail,
   detectRealtimeQaVoiceCommand,
   detectReviewVoiceCommand,
+  endsWithReviewCorrectieCommand,
   parseAnswerTranscript,
   stripReviewVoiceCommand,
 } from "./interview-commands.js";
@@ -396,6 +397,8 @@ const reviewInlineCorrection = {
   finalizeInFlight: false,
   /** Tijdstempel (ms) tot wanneer onTurn-segmenten worden genegeerd na activatie (echo-buffer). */
   echoGraceUntil: 0,
+  /** "Correctie"-commando ontvangen tijdens finalizeInFlight; uitvoeren zodra lock vrijkomt. */
+  pendingCorrectieAfterFinalize: false,
 };
 
 const INLINE_CORRECTION_RESUME_MS = 5500;
@@ -1364,7 +1367,7 @@ async function readTestTranscript(rec) {
  * @param {{ kind: "realtime-qa"|"conversation"; partial?: boolean }} opts
  */
 async function persistConversationTranscript(transcript, { kind, partial = false }) {
-  if (!state.keepInput) return;
+  if (!state.keepInput || isPwaMode()) return;
   const cleaned = String(transcript || "").trim();
   if (!cleaned) return;
   const stamp = new Date().toLocaleString("nl-NL", {
@@ -1631,11 +1634,10 @@ function buildReviewSpeechPlan() {
 
   if (paragraphs.length) {
     paragraphs.forEach((para, i) => {
-      const prefix = i === 0 ? "Notitie: " : "";
-      addText(`${prefix}${para}`, `body:${i}`);
+      addText(para, `body:${i}`);
     });
   } else if (body.trim()) {
-    addText(`Notitie: ${body.trim()}`, "body:0");
+    addText(body.trim(), "body:0");
   }
 
   document.querySelectorAll("#tasks-list .card-list__item").forEach((li, i) => {
@@ -1858,6 +1860,7 @@ function resetReviewInlineCorrectionState() {
   reviewInlineCorrection.applyInFlight = false;
   reviewInlineCorrection.finalizeInFlight = false;
   reviewInlineCorrection.echoGraceUntil = 0;
+  reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
 }
 
 function cancelPendingSpeechInterrupt({ resumePlayback = true } = {}) {
@@ -2075,9 +2078,15 @@ async function flushInlineCorrection({ final = false } = {}) {
 function handleReviewCorrectieCommand(opts = {}) {
   if (!REVIEW_INLINE_LISTEN_ENABLED) return;
   if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) {
-    console.debug(
-      `[correctie] handleReviewCorrectieCommand GEBLOKKEERD | pbActive=${state.reviewPlayback.active} | finalizeInFlight=${reviewInlineCorrection.finalizeInFlight} | corrActive=${reviewInlineCorrection.active}`,
-    );
+    if (reviewInlineCorrection.finalizeInFlight && state.reviewPlayback.active) {
+      reviewInlineCorrection.pendingCorrectieAfterFinalize = true;
+      updateReviewStatus("Correctie ontvangen — even wachten…");
+      console.debug(`[correctie] handleReviewCorrectieCommand GEQUEUED (finalizeInFlight actief) | fromQueue=${opts.fromQueue ?? false}`);
+    } else {
+      console.debug(
+        `[correctie] handleReviewCorrectieCommand GEBLOKKEERD | pbActive=${state.reviewPlayback.active} | finalizeInFlight=${reviewInlineCorrection.finalizeInFlight} | corrActive=${reviewInlineCorrection.active} | fromQueue=${opts.fromQueue ?? false}`,
+      );
+    }
     return;
   }
   if (reviewInlineCorrection.active) return;
@@ -2123,7 +2132,10 @@ function maybeHandleReviewVoiceCommand(text) {
     }
     if (cmd === "voorlezen" && isLikelyReviewTtsEcho(text)) return false;
   } else if (isLikelyReviewTtsEcho(text)) {
-    return false;
+    // Uitzondering voor carkit/speaker: als "Correctie" aan het einde staat terwijl de TTS-echo
+    // net is gestopt (ttsActive=false maar lastSpokenChunk bevat nog de echo-tekst), het commando
+    // toch uitvoeren. De echo-tekst vóór "Correctie" wordt hieronder gefilterd via isLikelyReviewTtsEcho(remainder).
+    if (cmd !== "correctie" || !endsWithReviewCorrectieCommand(text)) return false;
   }
 
   if (cmd === "correctie") {
@@ -2137,9 +2149,11 @@ function maybeHandleReviewVoiceCommand(text) {
       return false;
     }
     const remainder = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
-    if (remainder) appendInlineCorrectionSegment(remainder);
-    // true als er tekst is (één uiting "Correctie [tekst]"); false als alleen "Correctie"
-    return Boolean(remainder);
+    // TTS-echo-check: als de tekst vóór/na "Correctie" overeenkomt met de lopende TTS-chunk
+    // (bijv. carkit zonder AEC), dan is het geen gebruikersinput maar echo — niet toevoegen.
+    if (remainder && !isLikelyReviewTtsEcho(remainder)) appendInlineCorrectionSegment(remainder);
+    // true als er (echte) correctietekst is; false als alleen "Correctie" of pure echo
+    return Boolean(remainder && !isLikelyReviewTtsEcho(remainder));
   }
   if (cmd === "voorlezen") {
     void handleReviewVoorlezenCommand();
@@ -2199,9 +2213,9 @@ function handleReviewInlineSpeechStarted() {
   }
   if (reviewInlineCorrection.pendingInterrupt) return;
 
-  // Tijdens actieve TTS-uitvoer negeren we speech_started: de microfoon pikt
-  // de speaker-audio op als echo. Alleen expliciete "Correctie"-commando's
-  // (via onSpeechStopped) mogen het voorlezen onderbreken.
+  // Negeer speech_started als TTS actief is: dat signaal komt van de echo van de eigen
+  // speaker, niet van de gebruiker. De correctiestroom wordt pas geactiveerd via
+  // handleReviewCorrectieCommand nadat de gebruiker het commando heeft uitgesproken.
   if (state.reviewPlayback.ttsActive) return;
 }
 
@@ -2308,6 +2322,7 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
 async function finalizeInlineCorrectionAndResume() {
   if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
   reviewInlineCorrection.finalizeInFlight = true;
+  updateReviewStatus("Correctie verwerken…");
   const hadSegments = reviewInlineCorrection.segments.length > 0;
   const enteredViaCommand = reviewInlineCorrection.enteredViaCommand;
   const advanceIfEmpty = !hadSegments && !enteredViaCommand;
@@ -2317,13 +2332,14 @@ async function finalizeInlineCorrectionAndResume() {
   }
 
   console.debug(
-    `[correctie] finalizeInlineCorrectionAndResume start | hadSegments=${hadSegments} | suspend=${JSON.stringify(state.reviewPlayback.suspendForCorrection)} | playerActive=${reviewSpeechPlayer?.isActive?.()} | pbActive=${state.reviewPlayback.active}`,
+    `[correctie] finalizeInlineCorrectionAndResume start | hadSegments=${hadSegments} | pendingCorrectie=${reviewInlineCorrection.pendingCorrectieAfterFinalize} | suspend=${JSON.stringify(state.reviewPlayback.suspendForCorrection)} | playerActive=${reviewSpeechPlayer?.isActive?.()} | pbActive=${state.reviewPlayback.active}`,
   );
 
   const flushOk = await flushAllInlineCorrectionSegments();
   if (hadSegments && !flushOk) {
     console.debug("[correctie] FOUT: flush mislukt, annuleer hervatting");
     reviewInlineCorrection.finalizeInFlight = false;
+    reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
     updateReviewStatus("Correctie mislukt — spreek opnieuw of zeg \"Voorlezen\"");
     updateVoiceCorrectUi();
     return;
@@ -2338,6 +2354,7 @@ async function finalizeInlineCorrectionAndResume() {
   if (!state.reviewPlayback.suspendForCorrection) {
     console.debug("[correctie] PROBLEEM: suspendForCorrection is null na flush → geen hervatting");
     reviewInlineCorrection.finalizeInFlight = false;
+    reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
     return;
   }
 
@@ -2358,7 +2375,14 @@ async function finalizeInlineCorrectionAndResume() {
       updateReviewStatus(REVIEW_PLAYBACK_STATUS);
     }
   } finally {
-    reviewInlineCorrection.finalizeInFlight = false;
+    // Gequeued "Correctie"-commando uitvoeren vóórdat de lock losgelaten wordt.
+    if (reviewInlineCorrection.pendingCorrectieAfterFinalize) {
+      reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
+      reviewInlineCorrection.finalizeInFlight = false;
+      handleReviewCorrectieCommand({ fromQueue: true });
+    } else {
+      reviewInlineCorrection.finalizeInFlight = false;
+    }
   }
 }
 
@@ -4398,7 +4422,7 @@ async function loadHealth() {
     const res = await fetch("/health");
     const data = await res.json();
     state.dryRun = Boolean(data.dryRun);
-    state.keepInput = readTestModePreference(Boolean(data.keepInput));
+    state.keepInput = isPwaMode() ? false : readTestModePreference(Boolean(data.keepInput));
     state.salesforceConfigured = Boolean(data.salesforceConfigured);
     state.mailSignature = typeof data.mailSignature === "string" ? data.mailSignature : "";
     state.defaultAccountManager =
@@ -4493,6 +4517,10 @@ async function loadHealth() {
 }
 
 fileDropzone?.addEventListener("click", (e) => {
+  // Always suppress the native label→input forwarding; the explicit fileInput.click()
+  // below is the single controlled trigger. Without this, the browser opens the file
+  // dialog twice: once via native label behavior and once via the programmatic call.
+  e.preventDefault();
   if (
     e.target.closest(
       "#btn-invoer, #btn-conversation, #btn-manual, #btn-cancel-drop, .input-hub__drop-busy, .test-recordings, button, a",
@@ -6326,9 +6354,20 @@ reviewInlineListenController = createRealtimeInterviewController({
   setStatus: updateReviewStatus,
   onSpeechStarted: () => handleReviewInlineSpeechStarted(),
   onTranscriptUpdate: (transcript) => {
-    if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) return;
+    if (!state.reviewPlayback.active) return;
     const userText = extractLastRealtimeUserText(transcript);
-    if (userText) maybeHandleReviewVoiceCommand(userText);
+    if (!userText) return;
+    if (reviewInlineCorrection.finalizeInFlight) {
+      // Alleen een puur "Correctie"-commando queuen; segmenttekst niet verwerken tijdens finalize.
+      // Guard op de flag voorkomt herhaald zetten bij opeenvolgende transcript-delta's.
+      if (!reviewInlineCorrection.pendingCorrectieAfterFinalize &&
+          detectReviewVoiceCommand(userText) === "correctie" && !stripReviewVoiceCommand(userText).trim()) {
+        reviewInlineCorrection.pendingCorrectieAfterFinalize = true;
+        updateReviewStatus("Correctie ontvangen — even wachten…");
+      }
+      return;
+    }
+    maybeHandleReviewVoiceCommand(userText);
   },
   onTurn: (turn) => {
     if (turn.role === "user") handleReviewInlineUserTurn(turn.text);

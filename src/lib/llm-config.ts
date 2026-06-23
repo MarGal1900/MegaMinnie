@@ -21,7 +21,7 @@ export { isWhisperConfigured } from "./whisper-config.js";
 export function getChatModel(): string {
   if (getLlmProvider() === "anthropic") {
     return (
-      process.env.ANTHROPIC_MODEL?.trim() || "claude-sonnet-4-20250514"
+      process.env.ANTHROPIC_MODEL?.trim() || "claude-sonnet-4-6"
     );
   }
   return process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini";

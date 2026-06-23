@@ -16,7 +16,23 @@ import {
 /** Ruimte onder 25 MB multer-limiet. */
 const MAX_CHUNK_BYTES = 24 * 1024 * 1024;
 const SEGMENT_ROLLOVER_BYTES = 20 * 1024 * 1024;
+/** OpenAI gpt-4o-transcribe-diarize: ~1400 s per chunk; rollover vóór die limiet. */
+export const SEGMENT_ROLLOVER_SECONDS = 1200;
 const RECORDER_TIMESLICE_MS = 1000;
+
+/** @param {number} startedAtMs @param {number} [nowMs] */
+export function getSegmentElapsedSeconds(startedAtMs, nowMs = Date.now()) {
+  if (!startedAtMs) return 0;
+  return Math.floor((nowMs - startedAtMs) / 1000);
+}
+
+/** @param {number} segmentElapsedSeconds @param {number} segmentBytes */
+export function shouldRolloverSegment(segmentElapsedSeconds, segmentBytes) {
+  return (
+    segmentElapsedSeconds >= SEGMENT_ROLLOVER_SECONDS ||
+    segmentBytes >= SEGMENT_ROLLOVER_BYTES
+  );
+}
 
 /**
  * @typedef {object} ConversationRecordingDeps
@@ -57,6 +73,7 @@ const conversationState = {
   audioCtx: null,
   startedAt: 0,
   elapsedBeforeSegment: 0,
+  rolloverInProgress: false,
   mimeType: "audio/webm",
   /** @type {ConversationRecordingDeps | null} */
   deps: null,
@@ -133,8 +150,9 @@ function startTimer() {
   conversationState.timerId = setInterval(() => {
     const elapsed =
       conversationState.elapsedBeforeSegment +
-      Math.floor((Date.now() - conversationState.startedAt) / 1000);
+      getSegmentElapsedSeconds(conversationState.startedAt);
     getDeps().updateTimer(elapsed);
+    maybeRolloverSegment();
   }, 500);
 }
 
@@ -150,6 +168,7 @@ function resetConversationState() {
   conversationState.currentChunks = [];
   conversationState.completedSegments = [];
   conversationState.elapsedBeforeSegment = 0;
+  conversationState.rolloverInProgress = false;
 }
 
 /** @param {Blob[]} chunks @param {string} mimeType */
@@ -180,12 +199,7 @@ function createRecorder(stream) {
   recorder.ondataavailable = (e) => {
     if (e.data.size <= 0) return;
     conversationState.currentChunks.push(e.data);
-    if (
-      conversationState.phase === "recording" &&
-      currentSegmentBytes() >= SEGMENT_ROLLOVER_BYTES
-    ) {
-      void rolloverSegment();
-    }
+    maybeRolloverSegment();
   };
 
   recorder.onerror = () => {
@@ -197,34 +211,48 @@ function createRecorder(stream) {
   recorder.start(RECORDER_TIMESLICE_MS);
 }
 
+function maybeRolloverSegment() {
+  if (conversationState.phase !== "recording") return;
+  if (conversationState.rolloverInProgress) return;
+  const segmentElapsed = getSegmentElapsedSeconds(conversationState.startedAt);
+  if (!shouldRolloverSegment(segmentElapsed, currentSegmentBytes())) return;
+  void rolloverSegment();
+}
+
 async function rolloverSegment() {
+  if (conversationState.rolloverInProgress) return;
   const recorder = conversationState.mediaRecorder;
   const stream = conversationState.mediaStream;
   if (!recorder || !stream || recorder.state !== "recording") return;
 
-  conversationState.elapsedBeforeSegment += Math.floor(
-    (Date.now() - conversationState.startedAt) / 1000,
-  );
-  conversationState.startedAt = Date.now();
-
-  await new Promise((resolve) => {
-    recorder.addEventListener(
-      "stop",
-      () => {
-        finalizeCurrentSegment();
-        resolve(undefined);
-      },
-      { once: true },
+  conversationState.rolloverInProgress = true;
+  try {
+    conversationState.elapsedBeforeSegment += getSegmentElapsedSeconds(
+      conversationState.startedAt,
     );
-    try {
-      recorder.stop();
-    } catch {
-      resolve(undefined);
-    }
-  });
+    conversationState.startedAt = Date.now();
 
-  if (conversationState.phase !== "recording" || !conversationState.mediaStream) return;
-  createRecorder(stream);
+    await new Promise((resolve) => {
+      recorder.addEventListener(
+        "stop",
+        () => {
+          finalizeCurrentSegment();
+          resolve(undefined);
+        },
+        { once: true },
+      );
+      try {
+        recorder.stop();
+      } catch {
+        resolve(undefined);
+      }
+    });
+
+    if (conversationState.phase !== "recording" || !conversationState.mediaStream) return;
+    createRecorder(stream);
+  } finally {
+    conversationState.rolloverInProgress = false;
+  }
 }
 
 /** Start vrije gespreksopname direct (microfoon + opname). */

@@ -4,6 +4,7 @@ import {
   detectInterviewCommandAtTail,
   detectRealtimeQaVoiceCommand,
   detectReviewVoiceCommand,
+  endsWithReviewCorrectieCommand,
   isNextQuestionCommand,
   isRealtimeQaCancelCommand,
   isRealtimeQaStopCommand,
@@ -184,6 +185,90 @@ describe("review playback voice commands", () => {
     // Standalone → lege remainder (activestatuscheck in maybeHandleReviewVoiceCommand)
     expect(stripReviewVoiceCommand("Correctie")).toBe("");
     expect(stripReviewVoiceCommand("Correctie.")).toBe("");
+  });
+
+  // Regressietest echo-guard: handleReviewInlineSpeechStarted keert terug (return) als
+  // ttsActive=true, zodat TTS-echo's de correctiestroom niet activeren. Commando's komen
+  // pas binnen via onSpeechStopped nadat de gebruiker daadwerkelijk spreekt — detectie
+  // moet dan altijd werken, ongeacht de TTS-status ten tijde van het spreken.
+  it("detecteert correctie-commando ongeacht of TTS actief was tijdens spreken", () => {
+    const inputs = ["Correctie", "correctie.", "CORRECTIE!", "Correctie,"];
+    for (const input of inputs) {
+      expect(detectReviewVoiceCommand(input), input).toBe("correctie");
+      expect(stripReviewVoiceCommand(input).trim(), input).toBe("");
+    }
+  });
+
+  // Regressietest Fix 2: onTranscriptUpdate gebruikt de combinatie
+  // detectReviewVoiceCommand(...) === "correctie" && !stripReviewVoiceCommand(...).trim()
+  // om te bepalen of een commando gequeued moet worden tijdens finalizeInFlight.
+  // Puur "Correctie" (geen remainder) → queuen. "Correctie [tekst]" → niet queuen.
+  // Extra: de guard !pendingCorrectieAfterFinalize voorkomt dat herhaalde delta-events
+  // de status meerdere keren updaten (idempotent zetten van de flag).
+  it("onderscheidt puur correctie-commando van correctie-met-inhoud voor queue-guard", () => {
+    const isPureCorrectieCommand = (text: string) =>
+      detectReviewVoiceCommand(text) === "correctie" &&
+      !stripReviewVoiceCommand(text).trim();
+
+    // Puur commando → mag gequeued worden tijdens finalizeInFlight
+    expect(isPureCorrectieCommand("Correctie")).toBe(true);
+    expect(isPureCorrectieCommand("correctie.")).toBe(true);
+    expect(isPureCorrectieCommand("CORRECTIE!")).toBe(true);
+    expect(isPureCorrectieCommand("Correctie,")).toBe(true);
+
+    // Commando met inhoud vooraan → niet queuen (correctietekst kan niet worden verwerkt)
+    expect(isPureCorrectieCommand("Correctie de naam is Jan")).toBe(false);
+    expect(isPureCorrectieCommand("Correctie het bedrag is vijfhonderd euro")).toBe(false);
+    expect(isPureCorrectieCommand("Correctie. De datum moet morgen zijn.")).toBe(false);
+
+    // Commando aan het einde (TTS-echo + Correctie) → wél herkend als commando, maar NIET puur
+    // (heeft remainder → wordt door echo-check gefilterd in maybeHandleReviewVoiceCommand)
+    expect(isPureCorrectieCommand("De naam is Jan Jansen. Correctie.")).toBe(false);
+    expect(isPureCorrectieCommand("Taak 3 het afwijzen van de offerte Correctie")).toBe(false);
+
+    // Geen commando → niet queuen
+    expect(isPureCorrectieCommand("de correctie staat op pagina twee")).toBe(false);
+    expect(isPureCorrectieCommand("voorlezen")).toBe(false);
+    expect(isPureCorrectieCommand("stop")).toBe(false);
+  });
+
+  // Regressietest Fix B: endsWithReviewCorrectieCommand — carkit/speaker echo-scenario.
+  // De Realtime API kan TTS-echo en gebruikersstem samenvoegen in één uiting.
+  // "Correctie" aan het einde moet alsnog worden herkend.
+  it("endsWithReviewCorrectieCommand herkent correctie aan het einde van een uiting", () => {
+    // Positieve gevallen — "Correctie" als laatste woord (met of zonder interpunctie)
+    expect(endsWithReviewCorrectieCommand("De naam is Jan Jansen. Correctie.")).toBe(true);
+    expect(endsWithReviewCorrectieCommand("Taak 3 het afwijzen van de offerte Correctie")).toBe(true);
+    expect(endsWithReviewCorrectieCommand("even corrigeren correctie")).toBe(true);
+    expect(endsWithReviewCorrectieCommand("zeg ik correctie!")).toBe(true);
+
+    // Negatieve gevallen — "Correctie" is NIET het laatste woord
+    expect(endsWithReviewCorrectieCommand("de correctie staat op pagina twee")).toBe(false);
+    expect(endsWithReviewCorrectieCommand("correctie van het bedrag")).toBe(false);
+
+    // Negatieve gevallen — enkelvoudige uitingen (al gedekt door isReviewCorrectieCommand)
+    expect(endsWithReviewCorrectieCommand("Correctie")).toBe(false);
+    expect(endsWithReviewCorrectieCommand("correctie.")).toBe(false);
+
+    // Negatieve gevallen — leeg of ander commando
+    expect(endsWithReviewCorrectieCommand("")).toBe(false);
+    expect(endsWithReviewCorrectieCommand("voorlezen")).toBe(false);
+    expect(endsWithReviewCorrectieCommand("stop")).toBe(false);
+  });
+
+  it("detectReviewVoiceCommand herkent correctie aan het einde van een gecombineerde uiting", () => {
+    expect(detectReviewVoiceCommand("De naam is Jan Jansen. Correctie.")).toBe("correctie");
+    expect(detectReviewVoiceCommand("Taak 3 het afwijzen van de offerte Correctie")).toBe("correctie");
+    // Controleer dat ander-einde-woorden GEEN false positive geven
+    expect(detectReviewVoiceCommand("de correctie staat op pagina twee")).toBeNull();
+    expect(detectReviewVoiceCommand("Dit is een correctie van de feiten")).toBeNull();
+  });
+
+  it("stripReviewVoiceCommand verwijdert correctie ook uit gecombineerde uiting", () => {
+    expect(stripReviewVoiceCommand("De naam is Jan Jansen. Correctie.").trim())
+      .toBe("De naam is Jan Jansen.");
+    expect(stripReviewVoiceCommand("Taak 3 het afwijzen van de offerte Correctie").trim())
+      .toBe("Taak 3 het afwijzen van de offerte");
   });
 });
 
