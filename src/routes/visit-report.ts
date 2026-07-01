@@ -230,9 +230,14 @@ visitReportRouter.post(
       const supplementText = getField(body, "supplementText");
       if (supplementText) {
         const rawSource = getField(body, "supplementSource");
-        // "correction" = gesproken correctie-instructie (niet bijvoegen als aanvulling)
         const supplementSource =
-          rawSource === "correction" ? "correction" : "voice";
+          rawSource === "correction"
+            ? "correction"
+            : rawSource === "task"
+              ? "task"
+              : rawSource === "event"
+                ? "event"
+                : "voice";
         const result = await extendVisitReport({
           existing,
           supplementRawText: supplementText,

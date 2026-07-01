@@ -19,6 +19,7 @@ import { getDefaultAccountManager } from "./lib/task-assignee-config.js";
 import { salesforceRouter } from "./routes/salesforce.js";
 import { realtimeRouter } from "./routes/realtime.js";
 import { visitReportRouter } from "./routes/visit-report.js";
+import { voiceRouter } from "./routes/voice.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -100,6 +101,7 @@ app.use("/api", requireApiKey);
 app.use("/api/visit-report", visitReportRouter);
 app.use("/api/salesforce", salesforceRouter);
 app.use("/api/realtime", realtimeRouter);
+app.use("/api/voice", voiceRouter);
 app.use(
   express.static(publicDir, {
     setHeaders(res, filePath) {

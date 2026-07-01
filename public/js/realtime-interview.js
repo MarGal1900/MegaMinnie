@@ -138,6 +138,7 @@ export function buildLiveRealtimeTranscript(turns, pendingUser = "", pendingAssi
  *   passiveListen?: boolean;
  *   onSpeechStarted?: () => void;
  *   onConnectionLost?: () => void;
+ *   onListenReady?: () => void;
  * }} RealtimeInterviewOptions
  */
 
@@ -170,8 +171,25 @@ export function createRealtimeInterviewController(options) {
   let connecting = false;
   let openingGreetingSent = false;
   let dataChannelReady = false;
+  /** @type {Promise<void> | null} */
+  let listenReadyPromise = null;
+  /** @type {(() => void) | null} */
+  let listenReadyResolve = null;
   /** @type {object | null} Queued speakText payload — verstuurd zodra data channel opent. */
   let pendingSpeakPayload = null;
+
+  const resetListenReadyWaiter = () => {
+    listenReadyPromise = new Promise((resolve) => {
+      listenReadyResolve = resolve;
+    });
+  };
+
+  const resolveListenReady = () => {
+    if (dataChannelReady) return;
+    dataChannelReady = true;
+    listenReadyResolve?.();
+    listenReadyResolve = null;
+  };
   let remoteTrackReady = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let openingGreetingFallbackTimer = null;
@@ -179,6 +197,7 @@ export function createRealtimeInterviewController(options) {
   let turns = [];
   let pendingUserTranscript = "";
   let pendingAssistantTranscript = "";
+  let lastCompletedUserTranscript = "";
   /** @type {ReturnType<typeof setTimeout> | null} */
   let speechStoppedTimer = null;
 
@@ -331,6 +350,9 @@ export function createRealtimeInterviewController(options) {
   };
 
   const cleanup = () => {
+    dataChannelReady = false;
+    listenReadyResolve = null;
+    listenReadyPromise = null;
     resetOpeningGreetingState();
     if (speechStoppedTimer) {
       clearTimeout(speechStoppedTimer);
@@ -338,6 +360,7 @@ export function createRealtimeInterviewController(options) {
     }
     pendingUserTranscript = "";
     pendingAssistantTranscript = "";
+    lastCompletedUserTranscript = "";
     correctionDialogueActive = false;
     mutedRemoteStream = null;
     if (dataChannel) {
@@ -428,8 +451,10 @@ export function createRealtimeInterviewController(options) {
     if (speechStoppedTimer) clearTimeout(speechStoppedTimer);
     speechStoppedTimer = setTimeout(() => {
       speechStoppedTimer = null;
-      const pendingUserText = pendingUserTranscript.replace(/\s+/g, " ").trim();
+      const pendingUserText =
+        pendingUserTranscript.replace(/\s+/g, " ").trim() || lastCompletedUserTranscript;
       pendingUserTranscript = "";
+      lastCompletedUserTranscript = "";
       options.onSpeechStopped?.({
         pendingUserText,
         transcript: buildLiveTranscript(),
@@ -462,6 +487,8 @@ export function createRealtimeInterviewController(options) {
       type === "conversation.item.input_audio_transcription.completed" ||
       type === "input_audio_transcription.completed"
     ) {
+      const text = readRealtimeTranscriptText(payload);
+      if (text) lastCompletedUserTranscript = text.replace(/\s+/g, " ").trim();
       pendingUserTranscript = "";
       return;
     }
@@ -520,11 +547,12 @@ export function createRealtimeInterviewController(options) {
     dataChannel = peer.createDataChannel("oai-events");
     dataChannel.addEventListener("open", () => {
       emitDebug("Data channel open");
-      dataChannelReady = true;
+      resolveListenReady();
       if (pendingSpeakPayload) {
         dataChannel.send(JSON.stringify(pendingSpeakPayload));
         pendingSpeakPayload = null;
       }
+      options.onListenReady?.();
       if (listenOnly) {
         if (!passiveListen) {
           setStatus("Spreek je correctie in…");
@@ -653,6 +681,8 @@ export function createRealtimeInterviewController(options) {
     const prefetchedStream = startOverrides.prefetchedStream ?? null;
     let ownedPrefetchedStream = false;
     resetOpeningGreetingState();
+    dataChannelReady = false;
+    resetListenReadyWaiter();
     turns = [];
     emitTranscript();
     updateState({ connecting: true });
@@ -831,6 +861,24 @@ export function createRealtimeInterviewController(options) {
     return true;
   };
 
+  /**
+   * @param {{ timeoutMs?: number }} [opts]
+   * @returns {Promise<void>}
+   */
+  const waitForListenReady = ({ timeoutMs = 15000 } = {}) => {
+    if (dataChannelReady) return Promise.resolve();
+    if (!listenReadyPromise) resetListenReadyWaiter();
+    return Promise.race([
+      listenReadyPromise,
+      new Promise((_, reject) => {
+        window.setTimeout(
+          () => reject(new Error("Realtime listen data channel timeout")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  };
+
   return {
     start,
     stop,
@@ -846,6 +894,8 @@ export function createRealtimeInterviewController(options) {
     getUserTranscript: () => buildUserTranscript(),
     isActive: () => active,
     isConnecting: () => connecting,
+    isListenReady: () => dataChannelReady,
+    waitForListenReady,
     speakText,
     cancelResponse,
   };

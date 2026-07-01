@@ -14,9 +14,41 @@ import {
   detectRealtimeQaVoiceCommand,
   detectReviewVoiceCommand,
   endsWithReviewCorrectieCommand,
+  isReviewCorrectieCommand,
+  containsReviewCorrectieCommand,
+  isLikelyReviewSpeechEcho,
   parseAnswerTranscript,
+  hasOkMegaMinnieWakePrefix,
+  isOkMegaMinnieWakeOnly,
+  parseOkMegaMinnieWakeCommand,
+  normalizeWakeCommandText,
   stripReviewVoiceCommand,
 } from "./interview-commands.js";
+import {
+  getInlineCaptureStatusMessage,
+  getInlineCaptureProcessingStatus,
+  getInlineCaptureFailureStatus,
+  isInlineCaptureVoiceCommand,
+  isReviewPlaybackStopCommand,
+  resolveInlineCaptureIntent,
+  resolveInlineCaptureSupplementSource,
+  resolveInlineCorrectionResumeDelay,
+  shouldCancelCorrectionResumeForUserSpeech,
+  shouldIgnoreCorrectionSpeech,
+  shouldQueueCorrectieDuringFinalize,
+  shouldSkipEmptyCorrectionResumeReschedule,
+  shouldStartNewCorrectionRound,
+} from "./review-inline-correction.js";
+import {
+  getVoiceCommandAwaitingMessage,
+  getVoiceCommandWakeAckSpeechText,
+  getVoiceCommandFailureMessage,
+  getVoiceCommandUnrecognizedMessage,
+  getVoiceCommandWakePromptMessage,
+} from "./voice-command-router.js";
+import { resolveVoiceCommandPlanWithFallback } from "./voice-intent-client.js";
+import { createVoiceCommandExecutionGate } from "./voice-command-execution.js";
+import { createVoiceCommandWakeController } from "./voice-command-wake.js";
 import {
   renderTasksAndEvents,
   collectTasksEventsFromUi,
@@ -32,7 +64,12 @@ import {
   isConversationRecording,
 } from "./conversation-recording.js";
 import { createRealtimeInterviewController, REALTIME_QA_OPENING_TEXT } from "./realtime-interview.js";
-import { createOpenAiSpeechPlayback, playOpenAiSpeechOnce, prefetchOpenAiSpeech } from "./openai-speech.js";
+import {
+  createOpenAiSpeechPlayback,
+  playOpenAiSpeechOnce,
+  prefetchOpenAiSpeech,
+  REALTIME_QA_OPENING_PLAYBACK_RATE,
+} from "./openai-speech.js";
 import { initShareReportEmail } from "./share-report-email.js";
 import { OnboardingTour } from "./onboarding.js";
 
@@ -384,6 +421,8 @@ const reviewInlineCorrection = {
   active: false,
   pendingInterrupt: false,
   enteredViaCommand: false,
+  /** @type {"correction"|"task"|"event"} */
+  intent: "correction",
   /** @type {string[]} */
   segments: [],
   flushedSegmentCount: 0,
@@ -399,16 +438,20 @@ const reviewInlineCorrection = {
   echoGraceUntil: 0,
   /** "Correctie"-commando ontvangen tijdens finalizeInFlight; uitvoeren zodra lock vrijkomt. */
   pendingCorrectieAfterFinalize: false,
+  /** Gebruiker spreekt nog (speech_started zonder speech_stopped) — pauzeer auto-hervatting. */
+  correctionUserSpeaking: false,
+  /** TTS-volume is verlaagd omdat er spraak werd gedetecteerd tijdens ttsActive. */
+  duckedForSpeech: false,
 };
 
-const INLINE_CORRECTION_RESUME_MS = 5500;
-const INLINE_CORRECTION_EMPTY_RESUME_MS = 1200;
 const INLINE_INTERRUPT_CONFIRM_MS = 450;
 
 /** Passief Realtime-luisteren tijdens voorlezen; spraakcommando "Correctie" + live /extend. */
 const REVIEW_INLINE_LISTEN_ENABLED = true;
+const VOICE_COMMAND_WAKE_LISTEN_ENABLED = true;
 
 const REVIEW_PLAYBACK_STATUS = "";
+const VOICE_COMMAND_PROCESSING_STATUS = "Commando verwerken…";
 /** @type {ReturnType<typeof createOpenAiSpeechPlayback> | null} */
 let reviewSpeechPlayer = null;
 let reviewPlaybackSessionId = 0;
@@ -420,6 +463,16 @@ let realtimeAutoFinishing = false;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let realtimeFinishCheckTimer = null;
 let realtimeQaDraftActive = false;
+let voiceCommandPttActive = false;
+/** @type {string | null} */
+let pendingVoiceCommandText = null;
+/** @type {{ action?: string | null; remainder?: string } | null} */
+let pendingVoiceCommandPlan = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let voiceCommandWakeListenRetryTimer = null;
+/** @type {ReturnType<typeof createVoiceCommandWakeController> | null} */
+let voiceCommandWake = null;
+const voiceCommandExecutionGate = createVoiceCommandExecutionGate();
 
 function setInterviewButtonUi(active) {
   btnInvoer?.classList.toggle("is-recording", active);
@@ -797,6 +850,7 @@ const btnReviewPause = $("btn-review-pause");
 const btnReviewResume = $("btn-review-resume");
 const btnReviewStop = $("btn-review-stop");
 const btnVoiceCorrect = $("btn-voice-correct");
+const btnVoiceCommand = $("btn-voice-command");
 const reviewStatus = $("review-status");
 const interviewPanel = $("interview-panel");
 const interviewStep = $("interview-step");
@@ -1681,27 +1735,9 @@ function resolveReviewResumeChunkIndex(suspend, keys, chunkCount, opts = {}) {
   return Math.max(0, Math.min(suspend.resumeIndex, Math.max(0, chunkCount - 1)));
 }
 
-function normalizeReviewSpeechEchoText(text) {
-  return String(text || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /** @param {string} text */
 function isLikelyReviewTtsEcho(text) {
-  const spoken = normalizeReviewSpeechEchoText(state.reviewPlayback.lastSpokenChunk);
-  const candidate = normalizeReviewSpeechEchoText(text);
-  if (!spoken || !candidate) return false;
-  if (spoken.includes(candidate) || candidate.includes(spoken)) return true;
-  const spokenWords = new Set(spoken.split(" ").filter((w) => w.length > 3));
-  const candidateWords = candidate.split(" ").filter((w) => w.length > 3);
-  if (!candidateWords.length) return false;
-  const overlap = candidateWords.filter((w) => spokenWords.has(w)).length;
-  return overlap / candidateWords.length >= 0.6;
+  return isLikelyReviewSpeechEcho(text, state.reviewPlayback.lastSpokenChunk);
 }
 
 /** @param {string} text */
@@ -1821,10 +1857,602 @@ function prefetchReviewSpeech() {
   if (plan.chunks[1]) void prefetchOpenAiSpeech(plan.chunks[1]);
 }
 
+function resolveVoiceCommandIdleStatus() {
+  if (voiceCommandWake?.isAckInProgress()) return "Wat kan ik voor je doen…";
+  if (voiceCommandWake?.isAwaitingCommand()) return getVoiceCommandAwaitingMessage();
+  if (reviewInlineCorrection.active) {
+    return getInlineCaptureStatusMessage(
+      reviewInlineCorrection.intent,
+      reviewInlineCorrection.segments.length > 0,
+    );
+  }
+  if (state.reviewPlayback.active) return REVIEW_PLAYBACK_STATUS;
+  if (hasUitgewerktResult()) return voiceCommandWake?.getStatusMessage() || getVoiceCommandWakePromptMessage();
+  return "";
+}
+
+function clearVoiceCommandProcessingStatusIfStale() {
+  if (reviewStatus?.textContent !== VOICE_COMMAND_PROCESSING_STATUS) return;
+  updateReviewStatus(resolveVoiceCommandIdleStatus());
+}
+
+function resolveVoiceCommandWakeListenStatus() {
+  return voiceCommandWake?.getStatusMessage() || "Spraakcommando's verbinden…";
+}
+
+function cancelVoiceCommandWakeListenRetry() {
+  if (voiceCommandWakeListenRetryTimer) {
+    clearTimeout(voiceCommandWakeListenRetryTimer);
+    voiceCommandWakeListenRetryTimer = null;
+  }
+}
+
+/** Herstel wake-luisteren of voorlezen-status na commandoverwerking. */
+function resumeVoiceCommandFlowAfterExecution() {
+  clearVoiceCommandProcessingStatusIfStale();
+  if (reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
+  if (state.reviewPlayback.active) {
+    if (isReviewInlineListening()) {
+      reviewInlineListenController?.setMicEnabled(true);
+    } else if (REVIEW_INLINE_LISTEN_ENABLED && realtimeInterviewEnabled) {
+      void ensureReviewInlineListen();
+    }
+    if (!reviewInlineCorrection.active) {
+      updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+    }
+    return;
+  }
+  if (!isVoiceCommandInputActive()) {
+    scheduleEnsureVoiceCommandWakeListen(0);
+  }
+}
+
+/** @param {string} path @param {RequestInit} [options] @param {number} [timeoutMs] */
+async function apiPostWithTimeout(path, options = {}, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await apiPost(path, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("Verzoek duurde te lang — probeer opnieuw.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function updateReviewStatus(message) {
   if (!reviewStatus) return;
   reviewStatus.textContent = message;
   reviewStatus.hidden = !message;
+}
+
+function updateVoiceCommandPttUi() {
+  btnVoiceCommand?.classList.toggle("is-recording", voiceCommandPttActive);
+  btnVoiceCommand?.setAttribute("aria-pressed", voiceCommandPttActive ? "true" : "false");
+  const label = voiceCommandPttActive ? "Stop luisteren" : "Spreek commando";
+  btnVoiceCommand?.setAttribute("aria-label", label);
+  btnVoiceCommand?.setAttribute("title", label);
+  btnVoiceCommand?.toggleAttribute(
+    "disabled",
+    Boolean(outputPanel?.classList.contains("is-busy")) || !hasUitgewerktResult(),
+  );
+}
+
+function isVoiceCommandInputActive() {
+  return voiceCommandPttActive || Boolean(voiceCommandWake?.isAwaitingCommand());
+}
+
+function stopVoiceCommandAwaiting() {
+  voiceCommandWake?.dispatch({ type: "CANCEL" });
+}
+
+function ensureVoiceCommandWakeController() {
+  if (voiceCommandWake) return voiceCommandWake;
+  voiceCommandWake = createVoiceCommandWakeController({
+    onStatus: (message) => {
+      if (!state.reviewPlayback.active && !reviewInlineCorrection.active) {
+        updateReviewStatus(message);
+      }
+    },
+    onMicEnabled: (enabled) => {
+      reviewInlineListenController?.setMicEnabled(enabled);
+    },
+    onPausePlayback: () => {
+      if (
+        state.reviewPlayback.active &&
+        !state.reviewPlayback.paused &&
+        !reviewInlineCorrection.active &&
+        !state.reviewPlayback.suspendForCorrection
+      ) {
+        pauseReviewPlayback();
+      }
+    },
+    onPlayWakeAck: async (generation, wakeKey) => {
+      void prefetchOpenAiSpeech(getVoiceCommandWakeAckSpeechText());
+      await playOpenAiSpeechOnce(getVoiceCommandWakeAckSpeechText(), {
+        playbackRate: REALTIME_QA_OPENING_PLAYBACK_RATE,
+      });
+      voiceCommandWake?.dispatch({
+        type: "WAKE_ACK_SUCCESS",
+        generation,
+        wakeKey,
+      });
+    },
+    onExecuteCommand: (text) => {
+      voiceCommandWake?.dispatch({ type: "COMMAND_STARTED" });
+      void runVoiceCommandExecution(text).finally(() => {
+        voiceCommandWake?.dispatch({ type: "COMMAND_FINISHED" });
+      });
+    },
+    onAckFailed: () => {
+      showFeedback("Kon bevestiging niet afspelen.", "info");
+    },
+  });
+  return voiceCommandWake;
+}
+
+/**
+ * @param {string} text
+ * @param {"partial"|"final"|"speech_stopped"} source
+ */
+function dispatchVoiceStt(text, source) {
+  if (!hasUitgewerktResult() || !realtimeInterviewEnabled) {
+    return { handled: false };
+  }
+  const ctrl = ensureVoiceCommandWakeController();
+  return ctrl.handleStt({
+    text,
+    source,
+    playbackActive: state.reviewPlayback.active,
+    blocked: reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight,
+  });
+}
+
+function isVoiceCommandWakeFlowActive() {
+  return Boolean(voiceCommandWake?.isWakeFlowActive());
+}
+
+function isVoiceCommandAwaitingActive() {
+  return Boolean(voiceCommandWake?.isAwaitingCommand());
+}
+
+function isVoiceCommandWakeListenReady() {
+  return Boolean(voiceCommandWake?.isListenReady());
+}
+
+function stopVoiceCommandPtt({ clearStatus = true } = {}) {
+  if (!voiceCommandPttActive) return;
+  voiceCommandPttActive = false;
+  voiceCommandWake?.dispatch({ type: "PTT_STOP" });
+  updateVoiceCommandPttUi();
+  const keepListen =
+    state.reviewPlayback.active ||
+    isVoiceCommandAwaitingActive() ||
+    (clearStatus && canUseVoiceCommandWakeListen());
+  if (!state.reviewPlayback.active && isReviewInlineListening() && !keepListen) {
+    reviewInlineListenController?.stop("");
+  } else if (keepListen && isReviewInlineListening()) {
+    reviewInlineListenController?.setMicEnabled(true);
+  }
+  if (clearStatus && !state.reviewPlayback.active && !reviewInlineCorrection.active) {
+    if (!isVoiceCommandAwaitingActive()) {
+      updateReviewStatus("");
+    }
+    void scheduleEnsureVoiceCommandWakeListen(0);
+  }
+}
+
+async function startVoiceCommandPtt() {
+  if (!hasUitgewerktResult()) {
+    showFeedback("Werk eerst een verslag uit voordat je spraakcommando's gebruikt.", "error");
+    return;
+  }
+  if (!realtimeInterviewEnabled) {
+    showFeedback(
+      "Spraakcommando's vereisen OpenAI Realtime. Zet REALTIME_INTERVIEW_ENABLED=true.",
+      "error",
+    );
+    return;
+  }
+  if (isRealtimeConversationRunning()) {
+    showFeedback("Stop eerst Vraag en Antwoord.", "error");
+    return;
+  }
+  if (isSupplementVoiceListening()) {
+    showFeedback("Stop eerst mondeling corrigeren.", "error");
+    return;
+  }
+  if (voiceCommandPttActive) return;
+
+  voiceCommandPttActive = true;
+  ensureVoiceCommandWakeController().dispatch({ type: "PTT_START" });
+  updateVoiceCommandPttUi();
+  updateReviewStatus('Spreek je commando… bijv. "Lees het verslag voor" of "Maak een taak aan"');
+
+  try {
+    if (!isReviewInlineListening()) {
+      await startReviewInlineListen();
+    }
+  } catch {
+    stopVoiceCommandPtt();
+    showFeedback("Spraakcommando kon niet starten.", "error");
+  }
+}
+
+/** @param {string} text */
+async function runVoiceCommandPlanOnce(text) {
+  updateReviewStatus(VOICE_COMMAND_PROCESSING_STATUS);
+  const plan = await resolveVoiceCommandPlanWithFallback({
+    text,
+    playbackActive: state.reviewPlayback.active,
+    useLlmFallback: true,
+  });
+
+  if (plan.wakeOnly) {
+    dispatchVoiceStt(text, "final");
+    return;
+  }
+
+  if (!plan.action) {
+    showFeedback(getVoiceCommandUnrecognizedMessage(), "info");
+    return;
+  }
+
+  if (plan.autoStartPlayback && plan.requiresPlayback) {
+    if (isInlineCaptureVoiceCommand(plan.action)) {
+      if (!(await ensureReviewPlaybackShellForCapture())) return;
+      applyReviewVoiceCommandFromPlan(text, plan);
+      return;
+    }
+    pendingVoiceCommandText = text;
+    pendingVoiceCommandPlan = plan;
+    await startReviewPlayback();
+    return;
+  }
+
+  if (plan.action === "start_voorlezen") {
+    await startReviewPlayback();
+    return;
+  }
+
+  if (plan.action === "resume_voorlezen") {
+    await handleReviewVoorlezenCommand();
+    return;
+  }
+
+  if (plan.action === "stop") {
+    if (state.reviewPlayback.active) {
+      stopReviewPlayback();
+    } else {
+      showFeedback(getVoiceCommandFailureMessage("stop"), "info");
+    }
+    return;
+  }
+
+  if (!state.reviewPlayback.active) {
+    showFeedback(getVoiceCommandFailureMessage(plan.action), "info");
+    return;
+  }
+
+  applyReviewVoiceCommandFromPlan(text, plan);
+}
+
+/** @param {string} text */
+async function executeVoiceCommandPlan(text) {
+  const trimmed = String(text || "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return;
+
+  const first = voiceCommandExecutionGate.begin(trimmed);
+  if (first === "skip" || first === "queue") return;
+
+  try {
+    let current = trimmed;
+    for (;;) {
+      try {
+        await runVoiceCommandPlanOnce(current);
+      } finally {
+        const next = voiceCommandExecutionGate.finish();
+        if (!next) break;
+        current = next;
+        if (voiceCommandExecutionGate.begin(current) !== "run") break;
+      }
+    }
+  } catch (err) {
+    voiceCommandExecutionGate.finish();
+    throw err;
+  } finally {
+    resumeVoiceCommandFlowAfterExecution();
+  }
+}
+
+/** @returns {Promise<boolean>} */
+async function ensureReviewPlaybackShellForCapture() {
+  if (state.reviewPlayback.active) return true;
+  cancelVoiceCommandWakeListenRetry();
+  if (isRealtimeConversationRunning()) stopRealtimeInterview("");
+  const plan = buildReviewSpeechPlan();
+  if (!plan.chunks.length) {
+    showFeedback("Geen tekst om te corrigeren.", "error");
+    return false;
+  }
+  beginReviewPlaybackSession();
+  state.reviewPlayback = {
+    active: true,
+    paused: true,
+    cancelled: false,
+    chunks: plan.chunks,
+    chunkParagraphKeys: plan.chunkParagraphKeys,
+    index: 0,
+    suspendForCorrection: null,
+    suppressLoopCleanup: false,
+    ttsActive: false,
+    lastSpokenChunk: plan.chunks[0] ?? "",
+  };
+  ensureVoiceCommandWakeController().dispatch({ type: "PLAYBACK_STARTED" });
+  updateReviewUi();
+  if (REVIEW_INLINE_LISTEN_ENABLED && realtimeInterviewEnabled && !isReviewInlineListening()) {
+    try {
+      await startReviewInlineListen();
+    } catch {
+      showFeedback("Spraakherkenning voor correctie kon niet starten.", "error");
+      return false;
+    }
+  }
+  return true;
+}
+
+/** @param {import("./voice-command-router.js").VoiceCommandAction | null} action @param {string} remainder */
+function applyVoiceCommandPlanRemainder(action, remainder) {
+  const cleaned = String(remainder || "").replace(/\s+/g, " ").trim();
+  if (!cleaned || !action || !isInlineCaptureVoiceCommand(action)) return false;
+  const intent = resolveInlineCaptureIntent(action);
+  if (!intent) return false;
+  if (!reviewInlineCorrection.active) {
+    handleReviewInlineCaptureCommand(intent);
+  } else if (reviewInlineCorrection.intent !== intent) {
+    return false;
+  }
+  appendInlineCorrectionSegment(cleaned);
+  return true;
+}
+
+/** @param {string} text @param {{ action?: string | null; remainder?: string } | null} [plan] */
+function applyReviewVoiceCommandFromPlan(text, plan = null) {
+  let handled = maybeHandleReviewVoiceCommand(text);
+  if (!handled && plan?.remainder) {
+    handled = applyVoiceCommandPlanRemainder(plan.action, plan.remainder);
+  }
+  if (
+    reviewInlineCorrection.active &&
+    (handled || reviewInlineCorrection.segments.length > 0)
+  ) {
+    scheduleInlineCorrectionResume();
+    return handled;
+  }
+  if (!handled && state.reviewPlayback.active) {
+    showFeedback("Commando niet herkend tijdens voorlezen.", "info");
+  }
+  return handled;
+}
+
+function canUseVoiceCommandWakeListen() {
+  return (
+    VOICE_COMMAND_WAKE_LISTEN_ENABLED &&
+    REVIEW_INLINE_LISTEN_ENABLED &&
+    hasUitgewerktResult() &&
+    realtimeInterviewEnabled &&
+    !isRealtimeConversationRunning() &&
+    !isSupplementVoiceListening() &&
+    !outputPanel?.classList.contains("is-busy") &&
+    !state.reviewPlayback.active &&
+    !voiceCommandPttActive &&
+    !reviewInlineCorrection.active &&
+    !reviewInlineCorrection.finalizeInFlight
+  );
+}
+
+function shouldScheduleVoiceCommandWakeListenRetry() {
+  return (
+    VOICE_COMMAND_WAKE_LISTEN_ENABLED &&
+    REVIEW_INLINE_LISTEN_ENABLED &&
+    hasUitgewerktResult() &&
+    realtimeInterviewEnabled &&
+    !isRealtimeConversationRunning() &&
+    !isSupplementVoiceListening() &&
+    !outputPanel?.classList.contains("is-busy") &&
+    !state.reviewPlayback.active &&
+    !voiceCommandPttActive &&
+    !reviewInlineCorrection.active &&
+    !reviewInlineCorrection.finalizeInFlight &&
+    !isReviewInlineListening()
+  );
+}
+
+/** @param {{ pendingUserText?: string; transcript?: string }} [ctx] */
+function extractVoiceCommandSpeechText(ctx = {}) {
+  const pending = String(ctx.pendingUserText || "").trim();
+  const fromTranscript = extractLastRealtimeUserText(ctx.transcript || "");
+  return pending || fromTranscript;
+}
+
+async function waitForReviewInlineListenReady() {
+  if (reviewInlineListenController?.isListenReady?.()) return true;
+  try {
+    await reviewInlineListenController?.waitForListenReady?.({ timeoutMs: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureVoiceCommandWakeListen() {
+  if (
+    !VOICE_COMMAND_WAKE_LISTEN_ENABLED ||
+    !REVIEW_INLINE_LISTEN_ENABLED ||
+    !hasUitgewerktResult() ||
+    !realtimeInterviewEnabled ||
+    isRealtimeConversationRunning() ||
+    isSupplementVoiceListening() ||
+    outputPanel?.classList.contains("is-busy") ||
+    state.reviewPlayback.active ||
+    voiceCommandPttActive ||
+    reviewInlineCorrection.active ||
+    reviewInlineCorrection.finalizeInFlight
+  ) {
+    return false;
+  }
+
+  const ctrl = ensureVoiceCommandWakeController();
+
+  if (!isReviewInlineListening()) {
+    ctrl.dispatch({ type: "LISTEN_CONNECTING" });
+    updateReviewStatus("Spraakcommando's verbinden…");
+    try {
+      const started = await startReviewInlineListen();
+      if (started === false) {
+        updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+        return false;
+      }
+    } catch {
+      updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+      return false;
+    }
+  } else if (!ctrl.isListenReady()) {
+    ctrl.dispatch({ type: "LISTEN_CONNECTING" });
+    updateReviewStatus("Spraakcommando's verbinden…");
+  }
+
+  const ready = await waitForReviewInlineListenReady();
+  if (!ready) {
+    updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+    return false;
+  }
+
+  ctrl.dispatch({ type: "LISTEN_READY" });
+  reviewInlineListenController?.setMicEnabled(true);
+  void prefetchOpenAiSpeech(getVoiceCommandWakeAckSpeechText());
+  return true;
+}
+
+/** @param {number} [delayMs] */
+function scheduleEnsureVoiceCommandWakeListen(delayMs = 0) {
+  if (voiceCommandWakeListenRetryTimer) {
+    clearTimeout(voiceCommandWakeListenRetryTimer);
+    voiceCommandWakeListenRetryTimer = null;
+  }
+  voiceCommandWakeListenRetryTimer = setTimeout(() => {
+    voiceCommandWakeListenRetryTimer = null;
+    void (async () => {
+      const ready = await ensureVoiceCommandWakeListen();
+      if (!ready && shouldScheduleVoiceCommandWakeListenRetry()) {
+        scheduleEnsureVoiceCommandWakeListen(1500);
+      }
+    })();
+  }, delayMs);
+}
+
+function stopVoiceCommandWakeListen({ clearStatus = true } = {}) {
+  if (
+    state.reviewPlayback.active ||
+    voiceCommandPttActive ||
+    isVoiceCommandAwaitingActive() ||
+    reviewInlineCorrection.active
+  ) {
+    return;
+  }
+  if (!isReviewInlineListening()) return;
+  voiceCommandWake?.dispatch({ type: "LISTEN_LOST" });
+  reviewInlineListenController?.stop("");
+  if (clearStatus) updateReviewStatus("");
+}
+
+/** Herstelt wake-luisteren na inline correctie (PTT/ack/mic kunnen blijven hangen). */
+function restoreVoiceCommandListenAfterCorrection() {
+  voiceCommandWake?.dispatch({ type: "CANCEL" });
+  if (voiceCommandPttActive) {
+    voiceCommandPttActive = false;
+    updateVoiceCommandPttUi();
+  }
+  if (isReviewInlineListening()) {
+    reviewInlineListenController?.setMicEnabled(true);
+  }
+}
+
+/** @param {string} text */
+function shouldSkipDuplicateVoiceCommandExecution(text) {
+  const trimmed = String(text || "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return true;
+  return voiceCommandExecutionGate.isRunning();
+}
+
+/** @param {string} text */
+async function runVoiceCommandExecution(text) {
+  stopVoiceCommandAwaiting();
+  stopVoiceCommandPtt({ clearStatus: false });
+  await executeVoiceCommandPlan(text);
+  if (reviewInlineCorrection.active) {
+    updateReviewStatus(
+      getInlineCaptureStatusMessage(
+        reviewInlineCorrection.intent,
+        reviewInlineCorrection.segments.length > 0,
+      ),
+    );
+  }
+}
+
+/** @param {string} text @param {"partial"|"final"|"speech_stopped"} source */
+function handleVoiceCommandStt(text, source) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return false;
+
+  if (voiceCommandPttActive) {
+    if (source === "partial") return false;
+    if (shouldSkipDuplicateVoiceCommandExecution(trimmed)) return true;
+    void runVoiceCommandExecution(trimmed);
+    return true;
+  }
+
+  const result = dispatchVoiceStt(trimmed, source);
+  if (result.delegate === "review") {
+    return maybeHandleReviewVoiceCommand(trimmed);
+  }
+  return Boolean(result.handled);
+}
+
+/** @param {{ pendingUserText?: string; transcript?: string }} ctx */
+function handleVoiceCommandPttSpeechStopped(ctx = {}) {
+  if (!voiceCommandPttActive) return;
+  const pending = String(ctx.pendingUserText || "").trim();
+  if (!pending) {
+    // Geen verse transcriptie: onTurn voert het commando al uit na wake.
+    return;
+  }
+  const text = pending;
+  if (!text) {
+    updateReviewStatus("");
+    showFeedback("Geen commando gehoord.", "info");
+    void scheduleEnsureVoiceCommandWakeListen(0);
+    return;
+  }
+  if (shouldSkipDuplicateVoiceCommandExecution(text)) return;
+  void runVoiceCommandExecution(text);
+}
+
+function drainPendingVoiceCommandAfterPlayback() {
+  if (!pendingVoiceCommandText) return;
+  const text = pendingVoiceCommandText;
+  const plan = pendingVoiceCommandPlan;
+  pendingVoiceCommandText = null;
+  pendingVoiceCommandPlan = null;
+  window.setTimeout(() => {
+    applyReviewVoiceCommandFromPlan(text, plan);
+  }, 350);
 }
 
 function isReviewInlineListening() {
@@ -1855,12 +2483,18 @@ function resetReviewInlineCorrectionState() {
   reviewInlineCorrection.active = false;
   reviewInlineCorrection.pendingInterrupt = false;
   reviewInlineCorrection.enteredViaCommand = false;
+  reviewInlineCorrection.intent = "correction";
   reviewInlineCorrection.segments = [];
   reviewInlineCorrection.flushedSegmentCount = 0;
   reviewInlineCorrection.applyInFlight = false;
   reviewInlineCorrection.finalizeInFlight = false;
   reviewInlineCorrection.echoGraceUntil = 0;
   reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
+  reviewInlineCorrection.correctionUserSpeaking = false;
+  if (reviewInlineCorrection.duckedForSpeech) {
+    reviewInlineCorrection.duckedForSpeech = false;
+    reviewSpeechPlayer?.setDucked(false);
+  }
 }
 
 function cancelPendingSpeechInterrupt({ resumePlayback = true } = {}) {
@@ -1895,15 +2529,24 @@ function beginInlineCorrection() {
   if (reviewInlineCorrection.active) return;
   reviewInlineCorrection.active = true;
   reviewInlineCorrection.pendingInterrupt = false;
-  // Grace-periode: negeer onTurn-segmenten die binnenkomen vlak na activatie.
-  // Dit filtert TTS-echobuffers die nog in de Realtime API-pipeline zitten.
   reviewInlineCorrection.echoGraceUntil = Date.now() + INLINE_CORRECTION_ECHO_GRACE_MS;
   if (!state.reviewPlayback.suspendForCorrection) {
     captureReviewPlaybackForCorrection();
   }
-  updateReviewStatus("Corrigeren — spreek je aanpassing in…");
+  updateReviewStatus(getInlineCaptureStatusMessage(reviewInlineCorrection.intent));
   updateVoiceCorrectUi();
   void ensureReviewInlineListen();
+}
+
+function restartInlineCorrectionRound() {
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+  clearInlineCorrectionTranscript();
+  reviewInlineCorrection.echoGraceUntil = Date.now() + INLINE_CORRECTION_ECHO_GRACE_MS;
+  updateReviewStatus(getInlineCaptureStatusMessage(reviewInlineCorrection.intent));
+  updateVoiceCorrectUi();
 }
 
 function updateVoiceCorrectUi() {
@@ -1923,7 +2566,7 @@ function updateVoiceCorrectUi() {
     state.reviewPlayback.active &&
     isReviewInlineListening()
   ) {
-    label = 'Spreek "Correctie" of je aanpassing in';
+    label = 'Zeg "Ok Minnie", "Ok MegaMinnie" of "Correctie" voor een commando';
   }
   btnVoiceCorrect?.setAttribute("aria-label", label);
   btnVoiceCorrect?.setAttribute("title", label);
@@ -1943,7 +2586,7 @@ function applyReportFieldsFromResult(result) {
   state.lastResult = result;
 }
 
-async function applyInlineCorrectionToReport(supplementText) {
+async function applyInlineCaptureToReport(supplementText, supplementSource) {
   const existing = getExistingMegaMinnieFromUi();
   if (!existing) {
     showFeedback("Notitietitel en -tekst mogen niet leeg zijn.", "error");
@@ -1954,14 +2597,20 @@ async function applyInlineCorrectionToReport(supplementText) {
   const fd = formFields();
   fd.append("existing", JSON.stringify(existing));
   fd.append("supplementText", supplementText.trim());
-  // Geef aan dat dit een gesproken correctie-instructie is, geen nieuwe aanvulling.
-  fd.append("supplementSource", "correction");
-  const result = await apiPost("/api/visit-report/extend", {
+  fd.append("supplementSource", supplementSource);
+  const result = await apiPostWithTimeout("/api/visit-report/extend", {
     method: "POST",
     body: fd,
   });
   applyReportFieldsFromResult({ ...result, transcript: supplementText.trim() });
   return result;
+}
+
+async function applyInlineCorrectionToReport(supplementText) {
+  return applyInlineCaptureToReport(
+    supplementText,
+    resolveInlineCaptureSupplementSource(reviewInlineCorrection.intent),
+  );
 }
 
 function waitForInlineCorrectionApply() {
@@ -2007,7 +2656,9 @@ function finishReviewPlaybackSession(sessionId, opts = {}) {
   state.reviewPlayback.active = false;
   state.reviewPlayback.paused = false;
   state.reviewPlayback.suppressLoopCleanup = false;
+  voiceCommandWake?.dispatch({ type: "PLAYBACK_STOPPED" });
   updateReviewUi();
+  void scheduleEnsureVoiceCommandWakeListen(0);
 }
 
 function clearInlineCorrectionTranscript() {
@@ -2056,12 +2707,15 @@ async function flushInlineCorrection({ final = false } = {}) {
   updateReviewStatus("Tekst bijwerken…");
   try {
     const result = await applyInlineCorrectionToReport(supplementText);
-    if (!result) return false;
+    if (!result) {
+      updateReviewStatus(getInlineCaptureFailureStatus(reviewInlineCorrection.intent));
+      return false;
+    }
     reviewInlineCorrection.flushedSegmentCount = reviewInlineCorrection.segments.length;
     updateReviewStatus(
       reviewInlineCorrection.active
-        ? 'Tekst bijgewerkt — spreek verder of zeg "Voorlezen"'
-        : "",
+        ? getInlineCaptureStatusMessage(reviewInlineCorrection.intent, true)
+        : resolveVoiceCommandIdleStatus(),
     );
     return true;
   } catch (err) {
@@ -2069,27 +2723,40 @@ async function flushInlineCorrection({ final = false } = {}) {
       err instanceof Error ? err.message : "Live correctie mislukt",
       "error",
     );
+    updateReviewStatus(getInlineCaptureFailureStatus(reviewInlineCorrection.intent));
     return false;
   } finally {
     reviewInlineCorrection.applyInFlight = false;
   }
 }
 
-function handleReviewCorrectieCommand(opts = {}) {
+function handleReviewInlineCaptureCommand(intent, opts = {}) {
   if (!REVIEW_INLINE_LISTEN_ENABLED) return;
   if (!state.reviewPlayback.active || reviewInlineCorrection.finalizeInFlight) {
-    if (reviewInlineCorrection.finalizeInFlight && state.reviewPlayback.active) {
+    if (
+      reviewInlineCorrection.finalizeInFlight &&
+      state.reviewPlayback.active &&
+      intent === "correction"
+    ) {
       reviewInlineCorrection.pendingCorrectieAfterFinalize = true;
       updateReviewStatus("Correctie ontvangen — even wachten…");
-      console.debug(`[correctie] handleReviewCorrectieCommand GEQUEUED (finalizeInFlight actief) | fromQueue=${opts.fromQueue ?? false}`);
+      console.debug(
+        `[correctie] handleReviewInlineCaptureCommand GEQUEUED (finalizeInFlight actief) | intent=${intent} | fromQueue=${opts.fromQueue ?? false}`,
+      );
     } else {
       console.debug(
-        `[correctie] handleReviewCorrectieCommand GEBLOKKEERD | pbActive=${state.reviewPlayback.active} | finalizeInFlight=${reviewInlineCorrection.finalizeInFlight} | corrActive=${reviewInlineCorrection.active} | fromQueue=${opts.fromQueue ?? false}`,
+        `[correctie] handleReviewInlineCaptureCommand GEBLOKKEERD | pbActive=${state.reviewPlayback.active} | finalizeInFlight=${reviewInlineCorrection.finalizeInFlight} | corrActive=${reviewInlineCorrection.active} | intent=${intent} | fromQueue=${opts.fromQueue ?? false}`,
       );
     }
     return;
   }
-  if (reviewInlineCorrection.active) return;
+  if (reviewInlineCorrection.active) {
+    if (reviewInlineCorrection.intent !== intent) return;
+    if (shouldStartNewCorrectionRound(reviewInlineCorrection)) {
+      restartInlineCorrectionRound();
+    }
+    return;
+  }
 
   if (reviewInlineCorrection.resumeTimer) {
     clearTimeout(reviewInlineCorrection.resumeTimer);
@@ -2107,8 +2774,14 @@ function handleReviewCorrectieCommand(opts = {}) {
     pauseReviewPlayback();
   }
 
+  reviewInlineCorrection.intent = intent;
   reviewInlineCorrection.enteredViaCommand = opts.viaCommand !== false;
   beginInlineCorrection();
+}
+
+function handleReviewCorrectieCommand(opts = {}) {
+  stopVoiceCommandAwaiting();
+  handleReviewInlineCaptureCommand("correction", opts);
 }
 
 function appendInlineCorrectionSegment(text) {
@@ -2122,38 +2795,67 @@ function appendInlineCorrectionSegment(text) {
 
 function maybeHandleReviewVoiceCommand(text) {
   if (!state.reviewPlayback.active) return false;
-  const cmd = detectReviewVoiceCommand(text);
+  const wake = parseOkMegaMinnieWakeCommand(text);
+  const effectiveText = wake.wakeDetected ? wake.commandText : text;
+  if (wake.wakeDetected && wake.wakeOnly) {
+    const result = dispatchVoiceStt(text, "final");
+    return result.handled === true;
+  }
+  if (
+    !reviewInlineCorrection.active &&
+    (isReviewCorrectieCommand(effectiveText) || containsReviewCorrectieCommand(effectiveText))
+  ) {
+    // containsReviewCorrectieCommand vangt ook "Correctie" die door TTS-echo is omgeven
+    // (vóór EN na het woord), niet alleen aan begin/eind — vaak de reden dat je het
+    // commando tijdens voorlezen meerdere keren moest herhalen. Alleen actief zolang er
+    // nog geen correctie-dictee loopt, zodat gedicteerde inhoud met het woord "correctie"
+    // er niet zelf mee wordt weggefilterd.
+    handleReviewCorrectieCommand({ viaCommand: true });
+    return true;
+  }
+  const cmd = detectReviewVoiceCommand(effectiveText);
   if (!cmd) return false;
 
+  if (isReviewPlaybackStopCommand(cmd)) {
+    stopReviewPlayback();
+    return true;
+  }
+
   if (state.reviewPlayback.ttsActive) {
-    const remainder = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
-    if (cmd !== "correctie" && cmd !== "voorlezen" && remainder && isLikelyReviewTtsEcho(remainder)) {
+    const remainder = stripReviewVoiceCommand(effectiveText).replace(/\s+/g, " ").trim();
+    if (
+      !isInlineCaptureVoiceCommand(cmd) &&
+      cmd !== "voorlezen" &&
+      remainder &&
+      isLikelyReviewTtsEcho(remainder)
+    ) {
       return false;
     }
-    if (cmd === "voorlezen" && isLikelyReviewTtsEcho(text)) return false;
-  } else if (isLikelyReviewTtsEcho(text)) {
+    if (cmd === "voorlezen" && isLikelyReviewTtsEcho(effectiveText)) return false;
+  } else if (isLikelyReviewTtsEcho(effectiveText)) {
     // Uitzondering voor carkit/speaker: als "Correctie" aan het einde staat terwijl de TTS-echo
     // net is gestopt (ttsActive=false maar lastSpokenChunk bevat nog de echo-tekst), het commando
     // toch uitvoeren. De echo-tekst vóór "Correctie" wordt hieronder gefilterd via isLikelyReviewTtsEcho(remainder).
-    if (cmd !== "correctie" || !endsWithReviewCorrectieCommand(text)) return false;
+    if (cmd !== "correctie" || !endsWithReviewCorrectieCommand(effectiveText)) return false;
   }
 
-  if (cmd === "correctie") {
+  if (isInlineCaptureVoiceCommand(cmd)) {
+    const intent = resolveInlineCaptureIntent(cmd);
+    if (!intent) return false;
     const alreadyActive = reviewInlineCorrection.active;
-    handleReviewCorrectieCommand();
-    if (alreadyActive) {
-      // Correctie was al actief (bijv. herhaalde detectie via onTranscriptUpdate-delta's).
-      // Geef false terug zodat de aanroeper de tekst zelf kan verwerken via
-      // appendInlineCorrectionSegment + scheduleInlineCorrectionResume, en voorkomen
-      // dat groeiende delta-tekst steeds opnieuw wordt toegevoegd.
-      return false;
+    const remainder = stripReviewVoiceCommand(effectiveText).replace(/\s+/g, " ").trim();
+    handleReviewInlineCaptureCommand(intent);
+    if (alreadyActive && reviewInlineCorrection.intent === intent) {
+      if (remainder && !isLikelyReviewTtsEcho(remainder)) {
+        appendInlineCorrectionSegment(remainder);
+        return true;
+      }
+      return reviewInlineCorrection.active;
     }
-    const remainder = stripReviewVoiceCommand(text).replace(/\s+/g, " ").trim();
-    // TTS-echo-check: als de tekst vóór/na "Correctie" overeenkomt met de lopende TTS-chunk
-    // (bijv. carkit zonder AEC), dan is het geen gebruikersinput maar echo — niet toevoegen.
-    if (remainder && !isLikelyReviewTtsEcho(remainder)) appendInlineCorrectionSegment(remainder);
-    // true als er (echte) correctietekst is; false als alleen "Correctie" of pure echo
-    return Boolean(remainder && !isLikelyReviewTtsEcho(remainder));
+    if (remainder && !isLikelyReviewTtsEcho(remainder)) {
+      appendInlineCorrectionSegment(remainder);
+    }
+    return reviewInlineCorrection.active;
   }
   if (cmd === "voorlezen") {
     void handleReviewVoorlezenCommand();
@@ -2198,25 +2900,72 @@ async function handleReviewVoorlezenCommand() {
 
 function handleReviewInlineSpeechStarted() {
   if (!REVIEW_INLINE_LISTEN_ENABLED || !state.reviewPlayback.active) return;
-  // Als correctiemodus actief is, keer terug VÓÓR de timercancellatie.
-  // De timer mag alleen worden gereset door handleReviewInlineUserTurn (echte spraak)
-  // en nooit door achtergrondgeluid of echo.
-  if (
-    reviewInlineCorrection.active ||
-    reviewInlineCorrection.finalizeInFlight
-  ) {
+
+  if (reviewInlineCorrection.finalizeInFlight) return;
+
+  if (reviewInlineCorrection.active) {
+    if (state.reviewPlayback.ttsActive) return;
+    reviewInlineCorrection.correctionUserSpeaking = true;
+    if (reviewInlineCorrection.resumeTimer) {
+      clearTimeout(reviewInlineCorrection.resumeTimer);
+      reviewInlineCorrection.resumeTimer = null;
+    }
     return;
   }
+
   if (reviewInlineCorrection.resumeTimer) {
     clearTimeout(reviewInlineCorrection.resumeTimer);
     reviewInlineCorrection.resumeTimer = null;
   }
   if (reviewInlineCorrection.pendingInterrupt) return;
 
-  // Negeer speech_started als TTS actief is: dat signaal komt van de echo van de eigen
-  // speaker, niet van de gebruiker. De correctiestroom wordt pas geactiveerd via
-  // handleReviewCorrectieCommand nadat de gebruiker het commando heeft uitgesproken.
-  if (state.reviewPlayback.ttsActive) return;
+  // Tijdens actief voorlezen (ttsActive) niet volledig onderbreken op elke VAD-trigger — dat
+  // signaal is deels de eigen TTS-echo, geen harde stop/hervat-cyclus waard. Wél het volume
+  // dempen zodra er spraak wordt gedetecteerd: dat geeft de microfoon een veel schoner signaal
+  // van bijv. "Correctie", zonder voorlezen hoorbaar te laten stotteren. handleReviewInline-
+  // SpeechStopped herstelt het volume weer zodra de uiting is afgerond (commando gevonden of
+  // niet). Dit was de belangrijkste reden dat het commando vaak meerdere keren herhaald moest
+  // worden: de eigen TTS-audio overstemde de opname van "Correctie".
+  if (state.reviewPlayback.ttsActive) {
+    if (!reviewInlineCorrection.duckedForSpeech) {
+      reviewInlineCorrection.duckedForSpeech = true;
+      reviewSpeechPlayer?.setDucked(true);
+    }
+    return;
+  }
+
+  // Hieronder: gebruiker begint te praten TUSSEN twee voorgelezen zinnen (ttsActive=false),
+  // vóórdat er al een herkend "Correctie"-commando is. pendingInterrupt/interruptConfirmTimer
+  // stonden hier eerder als dode infrastructuur (nooit ergens echt gestart) — daardoor werd
+  // zelfs in een stille pauze niet proactief gepauzeerd en moest gewacht worden tot de hele
+  // uiting via de passieve transcript-pijplijn was afgerond, terwijl de volgende voorgelezen
+  // zin er soms al overheen begon te praten. Dat was een van de redenen dat "Correctie"
+  // herhaald moest worden. Nu: bevestig eerst INLINE_INTERRUPT_CONFIRM_MS lang dat het om
+  // echte spraak gaat (voorkomt pauzeren op een kort geluidje/naklank van de zojuist gestopte
+  // TTS), en pauzeer daarna proactief zodat de rest van de uiting schoon wordt opgenomen.
+  // handleReviewInlineSpeechStopped ruimt dit via cancelPendingSpeechInterrupt() weer netjes
+  // op als het toch geen commando was.
+  reviewInlineCorrection.pendingInterrupt = true;
+  reviewInlineCorrection.interruptConfirmTimer = window.setTimeout(() => {
+    reviewInlineCorrection.interruptConfirmTimer = null;
+    if (!reviewInlineCorrection.pendingInterrupt) return;
+    // Al bevestigd/afgehandeld via het commando-pad (beginInlineCorrection reset
+    // pendingInterrupt zelf) — niets meer te doen.
+    if (reviewInlineCorrection.active) return;
+    if (!state.reviewPlayback.active) {
+      reviewInlineCorrection.pendingInterrupt = false;
+      return;
+    }
+    if (state.reviewPlayback.ttsActive) {
+      // Volgende zin is intussen al gestart — geen stille gap meer, reset zodat een
+      // toekomstige echte gap opnieuw kan bevestigen.
+      reviewInlineCorrection.pendingInterrupt = false;
+      return;
+    }
+    if (!state.reviewPlayback.suspendForCorrection) {
+      captureReviewPlaybackForCorrection();
+    }
+  }, INLINE_INTERRUPT_CONFIRM_MS);
 }
 
 /** @param {string} text */
@@ -2237,9 +2986,16 @@ function handleReviewInlineUserTurn(text) {
     console.debug(`[correctie] userTurn GENEGEERD (echo grace): "${text.slice(0, 50)}"`);
     return;
   }
-  // Als de correctietekst al is ingediend (flushedSegmentCount > 0 en timer loopt), geen
-  // verdere segmenten accepteren van ruis/echo — spiegelt de guard in speechStopped.
-  if (reviewInlineCorrection.flushedSegmentCount > 0 && reviewInlineCorrection.resumeTimer) {
+  markInlineCorrectionSpeechContinued({ isLikelyEcho: isLikelyReviewTtsEcho(text) });
+  if (
+    shouldIgnoreCorrectionSpeech({
+      active: reviewInlineCorrection.active,
+      flushedSegmentCount: reviewInlineCorrection.flushedSegmentCount,
+      resumeTimer: reviewInlineCorrection.resumeTimer,
+      applyInFlight: reviewInlineCorrection.applyInFlight,
+      correctionUserSpeaking: reviewInlineCorrection.correctionUserSpeaking,
+    })
+  ) {
     return;
   }
   appendInlineCorrectionSegment(text);
@@ -2252,20 +3008,38 @@ function setReviewPlaybackTtsActive(ttsActive) {
   state.reviewPlayback.ttsActive = ttsActive;
 }
 
+function cancelInlineCorrectionResumeTimer() {
+  if (reviewInlineCorrection.resumeTimer) {
+    clearTimeout(reviewInlineCorrection.resumeTimer);
+    reviewInlineCorrection.resumeTimer = null;
+  }
+}
+
+function markInlineCorrectionSpeechContinued({ isLikelyEcho = false } = {}) {
+  if (
+    !shouldCancelCorrectionResumeForUserSpeech(reviewInlineCorrection, isLikelyEcho)
+  ) {
+    return false;
+  }
+  cancelInlineCorrectionResumeTimer();
+  reviewInlineCorrection.correctionUserSpeaking = true;
+  return true;
+}
+
 function scheduleInlineCorrectionResume() {
   const _stack = new Error().stack?.split("\n").slice(2, 4).join(" → ") ?? "";
   console.debug(
-    `[correctie] scheduleInlineCorrectionResume | segments=${reviewInlineCorrection.segments.length} | flushed=${reviewInlineCorrection.flushedSegmentCount} | timerActief=${Boolean(reviewInlineCorrection.resumeTimer)} | via: ${_stack}`,
+    `[correctie] scheduleInlineCorrectionResume | segments=${reviewInlineCorrection.segments.length} | flushed=${reviewInlineCorrection.flushedSegmentCount} | timerActief=${Boolean(reviewInlineCorrection.resumeTimer)} | userSpeaking=${reviewInlineCorrection.correctionUserSpeaking} | via: ${_stack}`,
   );
-  if (reviewInlineCorrection.resumeTimer) {
-    clearTimeout(reviewInlineCorrection.resumeTimer);
-  }
-  const delay =
-    reviewInlineCorrection.segments.length > 0 || reviewInlineCorrection.enteredViaCommand
-      ? INLINE_CORRECTION_RESUME_MS
-      : INLINE_CORRECTION_EMPTY_RESUME_MS;
+  if (reviewInlineCorrection.correctionUserSpeaking) return;
+  cancelInlineCorrectionResumeTimer();
+  const delay = resolveInlineCorrectionResumeDelay({
+    segmentsLength: reviewInlineCorrection.segments.length,
+    enteredViaCommand: reviewInlineCorrection.enteredViaCommand,
+  });
   reviewInlineCorrection.resumeTimer = setTimeout(() => {
     reviewInlineCorrection.resumeTimer = null;
+    if (reviewInlineCorrection.correctionUserSpeaking) return;
     void finalizeInlineCorrectionAndResume();
   }, delay);
 }
@@ -2276,6 +3050,11 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
   console.debug(
     `[correctie] speechStopped | pending="${pending0}" | corrActive=${reviewInlineCorrection.active} | pbActive=${state.reviewPlayback.active} | segments=${reviewInlineCorrection.segments.length} | flushed=${reviewInlineCorrection.flushedSegmentCount}`,
   );
+  if (reviewInlineCorrection.duckedForSpeech) {
+    reviewInlineCorrection.duckedForSpeech = false;
+    reviewSpeechPlayer?.setDucked(false);
+  }
+
   const handledCommand = tryHandleReviewVoiceCommandFromContext(ctx);
 
   if (reviewInlineCorrection.pendingInterrupt && !reviewInlineCorrection.active) {
@@ -2292,6 +3071,7 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
   }
 
   if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
+  reviewInlineCorrection.correctionUserSpeaking = false;
   if (reviewInlineCorrection.debounceTimer) {
     clearTimeout(reviewInlineCorrection.debounceTimer);
     reviewInlineCorrection.debounceTimer = null;
@@ -2302,18 +3082,26 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
     console.debug(`[correctie] speechStopped GENEGEERD (echo grace): "${pending.slice(0, 50)}"`);
   } else if (pending) {
     appendInlineCorrectionSegment(pending);
+    scheduleInlineCorrectionResume();
+    return;
   }
   void flushInlineCorrection({ final: false });
   updateReviewStatus(
-    reviewInlineCorrection.segments.length === 0
-      ? "Corrigeren — spreek je aanpassing in…"
-      : 'Luistert — spreek verder of zeg "Voorlezen"',
+    getInlineCaptureStatusMessage(
+      reviewInlineCorrection.intent,
+      reviewInlineCorrection.segments.length > 0,
+    ),
   );
   // Als de correctietekst al is ingediend (flushedSegmentCount > 0), mag de herstelTimer
   // niet worden gereset door achtergrondgeluid of TTS-echo's van het hervatte voorlezen.
   // De timer wordt alleen opnieuw gepland als er nog geen lopende timer is.
   // Dit voorkomt dat bij meerdere correcties de hervatting steeds wordt uitgesteld.
-  if (reviewInlineCorrection.flushedSegmentCount > 0 && reviewInlineCorrection.resumeTimer) {
+  if (
+    shouldSkipEmptyCorrectionResumeReschedule({
+      flushedSegmentCount: reviewInlineCorrection.flushedSegmentCount,
+      resumeTimer: reviewInlineCorrection.resumeTimer,
+    })
+  ) {
     return;
   }
   scheduleInlineCorrectionResume();
@@ -2322,7 +3110,7 @@ function handleReviewInlineSpeechStopped(ctx = {}) {
 async function finalizeInlineCorrectionAndResume() {
   if (!reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight) return;
   reviewInlineCorrection.finalizeInFlight = true;
-  updateReviewStatus("Correctie verwerken…");
+  updateReviewStatus(getInlineCaptureProcessingStatus(reviewInlineCorrection.intent));
   const hadSegments = reviewInlineCorrection.segments.length > 0;
   const enteredViaCommand = reviewInlineCorrection.enteredViaCommand;
   const advanceIfEmpty = !hadSegments && !enteredViaCommand;
@@ -2335,30 +3123,46 @@ async function finalizeInlineCorrectionAndResume() {
     `[correctie] finalizeInlineCorrectionAndResume start | hadSegments=${hadSegments} | pendingCorrectie=${reviewInlineCorrection.pendingCorrectieAfterFinalize} | suspend=${JSON.stringify(state.reviewPlayback.suspendForCorrection)} | playerActive=${reviewSpeechPlayer?.isActive?.()} | pbActive=${state.reviewPlayback.active}`,
   );
 
-  const flushOk = await flushAllInlineCorrectionSegments();
-  if (hadSegments && !flushOk) {
-    console.debug("[correctie] FOUT: flush mislukt, annuleer hervatting");
-    reviewInlineCorrection.finalizeInFlight = false;
-    reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
-    updateReviewStatus("Correctie mislukt — spreek opnieuw of zeg \"Voorlezen\"");
-    updateVoiceCorrectUi();
-    return;
-  }
-
-  clearInlineCorrectionTranscript();
-  reviewInlineCorrection.active = false;
-  reviewInlineCorrection.pendingInterrupt = false;
-  reviewInlineCorrection.enteredViaCommand = false;
-  updateVoiceCorrectUi();
-
-  if (!state.reviewPlayback.suspendForCorrection) {
-    console.debug("[correctie] PROBLEEM: suspendForCorrection is null na flush → geen hervatting");
-    reviewInlineCorrection.finalizeInFlight = false;
-    reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
-    return;
-  }
-
   try {
+    const flushOk = await flushAllInlineCorrectionSegments();
+    if (hadSegments && !flushOk) {
+      console.debug("[correctie] FOUT: flush mislukt, annuleer hervatting");
+      updateReviewStatus(getInlineCaptureFailureStatus(reviewInlineCorrection.intent));
+      updateVoiceCorrectUi();
+      return;
+    }
+
+    clearInlineCorrectionTranscript();
+    reviewInlineCorrection.active = false;
+    reviewInlineCorrection.pendingInterrupt = false;
+    reviewInlineCorrection.enteredViaCommand = false;
+    updateVoiceCorrectUi();
+
+    if (!state.reviewPlayback.suspendForCorrection) {
+      restoreVoiceCommandListenAfterCorrection();
+      if (hadSegments && state.reviewPlayback.active) {
+        if (!state.reviewPlayback.suspendForCorrection) {
+          captureReviewPlaybackForCorrection();
+        }
+        let resumed = resumeReviewPlaybackInPlace({ advanceIfEmpty: false });
+        if (!resumed) {
+          invalidateReviewPlaybackSession();
+          state.reviewPlayback.suppressLoopCleanup = true;
+          abortReviewPlaybackLoop();
+          await resumeReviewPlaybackAfterCorrection({ advanceIfEmpty: false });
+          resumed = true;
+        }
+        void ensureReviewInlineListen();
+        if (state.reviewPlayback.active) {
+          updateReviewStatus(REVIEW_PLAYBACK_STATUS);
+        }
+      } else if (hadSegments) {
+        finishReviewPlaybackSession(reviewPlaybackSessionId, { skipInlineListenStop: true });
+        scheduleEnsureVoiceCommandWakeListen(0);
+      }
+      return;
+    }
+
     const resumed = resumeReviewPlaybackInPlace({ advanceIfEmpty });
     console.debug(
       `[correctie] resumeReviewPlaybackInPlace → ${resumed} | playerActive=${reviewSpeechPlayer?.isActive?.()} | pbActive=${state.reviewPlayback.active} | playerIndex=${reviewSpeechPlayer?.getCurrentIndex?.()}`,
@@ -2370,13 +3174,16 @@ async function finalizeInlineCorrectionAndResume() {
       abortReviewPlaybackLoop();
       await resumeReviewPlaybackAfterCorrection({ advanceIfEmpty });
     }
+    restoreVoiceCommandListenAfterCorrection();
     void ensureReviewInlineListen();
     if (state.reviewPlayback.active) {
       updateReviewStatus(REVIEW_PLAYBACK_STATUS);
     }
   } finally {
-    // Gequeued "Correctie"-commando uitvoeren vóórdat de lock losgelaten wordt.
-    if (reviewInlineCorrection.pendingCorrectieAfterFinalize) {
+    if (
+      reviewInlineCorrection.pendingCorrectieAfterFinalize &&
+      state.reviewPlayback.active
+    ) {
       reviewInlineCorrection.pendingCorrectieAfterFinalize = false;
       reviewInlineCorrection.finalizeInFlight = false;
       handleReviewCorrectieCommand({ fromQueue: true });
@@ -2427,10 +3234,10 @@ function resumeReviewPlaybackInPlace(opts = {}) {
 
 async function startReviewInlineListen() {
   if (!REVIEW_INLINE_LISTEN_ENABLED || !realtimeInterviewEnabled || !reviewInlineListenController) {
-    return;
+    return false;
   }
-  if (isReviewInlineListening()) return;
-  await reviewInlineListenController.start({
+  if (isReviewInlineListening()) return true;
+  return reviewInlineListenController.start({
     listenOnly: true,
     passiveListen: true,
     correctionDialogue: false,
@@ -2440,7 +3247,10 @@ async function startReviewInlineListen() {
 async function ensureReviewInlineListen() {
   if (!REVIEW_INLINE_LISTEN_ENABLED) return;
   if (!state.reviewPlayback.active || !realtimeInterviewEnabled) return;
-  if (isReviewInlineListening()) return;
+  if (isReviewInlineListening()) {
+    reviewInlineListenController?.setMicEnabled(true);
+    return;
+  }
   try {
     await startReviewInlineListen();
   } catch {
@@ -2500,7 +3310,9 @@ async function startRealtimeQaConversation() {
   lastRealtimeTranscript = "";
   beginRealtimeQaDraft();
   setConversationStatus(`MegaMinnie: ${REALTIME_QA_OPENING_TEXT}…`);
-  const openingPromise = playOpenAiSpeechOnce(REALTIME_QA_OPENING_TEXT);
+  const openingPromise = playOpenAiSpeechOnce(REALTIME_QA_OPENING_TEXT, {
+    playbackRate: REALTIME_QA_OPENING_PLAYBACK_RATE,
+  });
   try {
     const started = await realtimeController?.start({ skipOpeningGreeting: true });
     if (!started || !isRealtimeConversationRunning()) return;
@@ -2638,6 +3450,7 @@ function updateReviewUi() {
   if (btnReviewResume) btnReviewResume.hidden = !paused || correcting;
   if (btnReviewStop) btnReviewStop.hidden = !pb.active;
   updateVoiceCorrectUi();
+  updateVoiceCommandPttUi();
 }
 
 function ensureReviewSpeechPlayer() {
@@ -2651,12 +3464,18 @@ function ensureReviewSpeechPlayer() {
   return reviewSpeechPlayer;
 }
 
-function stopReviewPlayback() {
+/** @param {{ rescheduleWakeListen?: boolean }} [opts] */
+function stopReviewPlayback(opts = {}) {
+  const { rescheduleWakeListen = true } = opts;
+  stopVoiceCommandPtt({ clearStatus: false });
   invalidateReviewPlaybackSession();
+  pendingVoiceCommandText = null;
+  pendingVoiceCommandPlan = null;
   state.reviewPlayback.suspendForCorrection = null;
   state.reviewPlayback.cancelled = true;
   state.reviewPlayback.active = false;
   state.reviewPlayback.paused = false;
+  voiceCommandWake?.dispatch({ type: "PLAYBACK_STOPPED" });
   reviewSpeechPlayer?.stop();
   stopReviewRealtimeSessions();
   if (isRealtimeConversationRunning()) {
@@ -2666,15 +3485,21 @@ function stopReviewPlayback() {
   window.speechSynthesis?.cancel();
   updateReviewUi();
   if (reviewStatus) reviewStatus.hidden = true;
+  if (rescheduleWakeListen) {
+    void scheduleEnsureVoiceCommandWakeListen(0);
+  }
 }
 
 async function runReviewPlayback(startIndex = 0) {
   const plan = buildReviewSpeechPlan();
   if (!plan.chunks.length) {
     showFeedback("Geen tekst om voor te lezen.", "error");
+    pendingVoiceCommandText = null;
+    pendingVoiceCommandPlan = null;
     return;
   }
 
+  cancelVoiceCommandWakeListenRetry();
   const safeStart = Math.max(0, Math.min(startIndex, plan.chunks.length - 1));
   void prefetchOpenAiSpeech(plan.chunks[safeStart]);
   if (plan.chunks[safeStart + 1]) void prefetchOpenAiSpeech(plan.chunks[safeStart + 1]);
@@ -2693,6 +3518,7 @@ async function runReviewPlayback(startIndex = 0) {
     ttsActive: false,
     lastSpokenChunk: plan.chunks[safeStart] ?? "",
   };
+  ensureVoiceCommandWakeController().dispatch({ type: "PLAYBACK_STARTED" });
   updateReviewUi();
   updateReviewStatus("");
 
@@ -2705,6 +3531,7 @@ async function runReviewPlayback(startIndex = 0) {
       showFeedback("Spraakherkenning voor correctie kon niet starten.", "error");
     }
   }
+  drainPendingVoiceCommandAfterPlayback();
 
   try {
     await ensureReviewSpeechPlayer().playFrom(plan.chunks, safeStart, {
@@ -2732,7 +3559,8 @@ async function startReviewPlayback() {
   if (isRealtimeConversationRunning()) {
     stopRealtimeInterview("");
   }
-  stopReviewPlayback();
+  cancelVoiceCommandWakeListenRetry();
+  stopReviewPlayback({ rescheduleWakeListen: false });
   await runReviewPlayback(0);
 }
 
@@ -3888,9 +4716,11 @@ function updateOutputVisibility() {
     $("result-area").hidden = true;
     if (reviewSection) reviewSection.hidden = true;
     stopReviewPlayback();
+    stopVoiceCommandWakeListen();
   } else {
     $("result-area").hidden = false;
     updateReviewUi();
+    void scheduleEnsureVoiceCommandWakeListen(0);
   }
   updateSupplementUi();
 }
@@ -4653,6 +5483,11 @@ btnSupplementRemoveAudio?.addEventListener("click", (e) => {
   clearSupplementExcept("voice");
   renderSupplementAttachments();
   updateSupplementUi();
+});
+
+btnVoiceCommand?.addEventListener("click", () => {
+  if (voiceCommandPttActive) stopVoiceCommandPtt();
+  else void startVoiceCommandPtt();
 });
 
 btnVoiceCorrect?.addEventListener("click", (e) => {
@@ -6119,6 +6954,7 @@ function   renderResult(result) {
     const fb = formatSyncFeedback(sf);
     if (fb) showFeedback(fb.msg, fb.type);
   }
+  scheduleEnsureVoiceCommandWakeListen(0);
 }
 
 btnSync?.addEventListener("click", () => syncToSalesforce());
@@ -6207,6 +7043,7 @@ function endProcessingUI() {
   if (btnCancelLoading) btnCancelLoading.setAttribute("hidden", "");
   btnProcess.disabled = !hasAnyInput();
   $("btn-sync").disabled = false;
+  scheduleEnsureVoiceCommandWakeListen(100);
 }
 
 function setBusy(busy, message) {
@@ -6353,45 +7190,82 @@ reviewInlineListenController = createRealtimeInterviewController({
   passiveListen: true,
   setStatus: updateReviewStatus,
   onSpeechStarted: () => handleReviewInlineSpeechStarted(),
-  onTranscriptUpdate: (transcript) => {
-    if (!state.reviewPlayback.active) return;
-    const userText = extractLastRealtimeUserText(transcript);
-    if (!userText) return;
-    if (reviewInlineCorrection.finalizeInFlight) {
-      // Alleen een puur "Correctie"-commando queuen; segmenttekst niet verwerken tijdens finalize.
-      // Guard op de flag voorkomt herhaald zetten bij opeenvolgende transcript-delta's.
-      if (!reviewInlineCorrection.pendingCorrectieAfterFinalize &&
-          detectReviewVoiceCommand(userText) === "correctie" && !stripReviewVoiceCommand(userText).trim()) {
-        reviewInlineCorrection.pendingCorrectieAfterFinalize = true;
-        updateReviewStatus("Correctie ontvangen — even wachten…");
-      }
-      return;
-    }
-    maybeHandleReviewVoiceCommand(userText);
+  onTranscriptUpdate: () => {
+    // Wake via FSM alleen op final/speech_stopped — geen partial debounce.
   },
   onTurn: (turn) => {
-    if (turn.role === "user") handleReviewInlineUserTurn(turn.text);
-  },
-  onSpeechStopped: (ctx) => {
-    handleReviewInlineSpeechStopped(ctx);
-  },
-  onConnectionLost: () => {
-    if (!REVIEW_INLINE_LISTEN_ENABLED || !state.reviewPlayback.active) return;
-    updateReviewStatus("Verbinding herstellen…");
-    window.setTimeout(() => void ensureReviewInlineListen(), 500);
-  },
-  onStateChange: ({ active, connecting }) => {
-    updateVoiceCorrectUi();
+    if (turn.role !== "user") return;
     if (
-      !REVIEW_INLINE_LISTEN_ENABLED ||
-      active ||
-      connecting ||
-      !state.reviewPlayback.active ||
-      reviewInlineCorrection.finalizeInFlight
+      state.reviewPlayback.active &&
+      !reviewInlineCorrection.active &&
+      !reviewInlineCorrection.finalizeInFlight &&
+      !isVoiceCommandAwaitingActive() &&
+      !voiceCommandPttActive &&
+      maybeHandleReviewVoiceCommand(turn.text)
     ) {
       return;
     }
-    window.setTimeout(() => void ensureReviewInlineListen(), 400);
+    if (handleVoiceCommandStt(turn.text, "final")) return;
+    if (state.reviewPlayback.active) handleReviewInlineUserTurn(turn.text);
+  },
+  onSpeechStopped: (ctx) => {
+    if (voiceCommandPttActive) {
+      handleVoiceCommandPttSpeechStopped(ctx);
+      return;
+    }
+    const text = extractVoiceCommandSpeechText(ctx);
+    if (text && handleVoiceCommandStt(text, "speech_stopped")) return;
+    if (state.reviewPlayback.active) {
+      const handledReview = tryHandleReviewVoiceCommandFromContext(ctx);
+      if (handledReview) {
+        if (reviewInlineCorrection.active) scheduleInlineCorrectionResume();
+        return;
+      }
+      handleReviewInlineSpeechStopped(ctx);
+    }
+  },
+  onListenReady: () => {
+    ensureVoiceCommandWakeController().dispatch({ type: "LISTEN_READY" });
+    if (state.reviewPlayback.active || voiceCommandPttActive || !hasUitgewerktResult()) return;
+    updateReviewStatus(resolveVoiceCommandWakeListenStatus());
+  },
+  onConnectionLost: () => {
+    voiceCommandWake?.dispatch({ type: "LISTEN_LOST" });
+    if (REVIEW_INLINE_LISTEN_ENABLED && state.reviewPlayback.active) {
+      updateReviewStatus("Verbinding herstellen…");
+      window.setTimeout(() => void ensureReviewInlineListen(), 500);
+      return;
+    }
+    if (shouldScheduleVoiceCommandWakeListenRetry()) {
+      updateReviewStatus("Verbinding herstellen…");
+      scheduleEnsureVoiceCommandWakeListen(500);
+    }
+  },
+  onStateChange: ({ active, connecting }) => {
+    updateVoiceCorrectUi();
+    if (connecting) {
+      ensureVoiceCommandWakeController().dispatch({ type: "LISTEN_CONNECTING" });
+      if (!state.reviewPlayback.active && hasUitgewerktResult() && !voiceCommandPttActive) {
+        updateReviewStatus("Spraakcommando's verbinden…");
+      }
+      return;
+    }
+    if (active) {
+      reviewInlineListenController?.setMicEnabled(true);
+      if (!state.reviewPlayback.active && hasUitgewerktResult() && !voiceCommandPttActive) {
+        updateReviewStatus(resolveVoiceCommandWakeListenStatus());
+      }
+      return;
+    }
+    voiceCommandWake?.dispatch({ type: "LISTEN_LOST" });
+    if (REVIEW_INLINE_LISTEN_ENABLED && state.reviewPlayback.active) {
+      const delay = reviewInlineCorrection.finalizeInFlight ? 800 : 400;
+      window.setTimeout(() => void ensureReviewInlineListen(), delay);
+      return;
+    }
+    if (shouldScheduleVoiceCommandWakeListenRetry()) {
+      scheduleEnsureVoiceCommandWakeListen(400);
+    }
   },
   onError: () => {
     if (!REVIEW_INLINE_LISTEN_ENABLED) {
@@ -6401,6 +7275,11 @@ reviewInlineListenController = createRealtimeInterviewController({
     if (state.reviewPlayback.active) {
       updateReviewStatus("Verbinding herstellen…");
       window.setTimeout(() => void ensureReviewInlineListen(), 800);
+      return;
+    }
+    if (shouldScheduleVoiceCommandWakeListenRetry()) {
+      updateReviewStatus("Verbinding herstellen…");
+      scheduleEnsureVoiceCommandWakeListen(800);
       return;
     }
     showFeedback("Realtime luisteren mislukt.", "error");

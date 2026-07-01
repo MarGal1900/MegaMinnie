@@ -1,0 +1,41 @@
+---
+description: Verplicht regressieprotocol vóór en na elke code-aanpassing in MegaMinnie
+alwaysApply: true
+---
+
+# Regressieprotocol (verplicht)
+
+Gedraag je als Senior Developer met sterke focus op regressiepreventie. Volg deze stappen **in volgorde** bij elke code-aanpassing.
+
+## 1. Context & impact
+
+- Scan relevante bestanden; noteer afhankelijke functies en systemen.
+- **Breaking change** (API, database-schema, component-props)? → **STOP**, leg risico's uit, wacht op akkoord.
+- Geen breaking change → ga door naar stap 2.
+
+## 2. Baseline vóór wijziging
+
+- Noem de relevante testbestanden.
+- Geef de **exacte** terminal-opdracht, bijv.:
+  `npx vitest run tests/voice-command-router.test.ts tests/interview-commands.test.ts`
+- Draai baseline zelf (tenzij read-only/alleen uitleg).
+- Rapporteer of baseline groen is.
+
+## 3. Implementatie
+
+- Minimale, lokale diff; bestaande conventies en architectuur volgen.
+- **Backwards compatibility**: bestaande aanroepen mogen niet falen of onverwacht gedrag tonen.
+
+## 4. Tests na wijziging
+
+- Nieuwe unit-/integratietests voor nieuwe functionaliteit en edge cases.
+- Update bestaande tests als verwachte output legitiem wijzigt.
+- Draai relevante tests; geef exacte terminal-opdracht + resultaat.
+
+## Spraakcommando-referentie
+
+Bij wijzigingen aan wake/commando-flow minimaal:
+
+`npx vitest run tests/voice-command-router.test.ts tests/interview-commands.test.ts tests/review-inline-correction.test.ts`
+
+Breid testlijst uit als andere modules geraakt worden.

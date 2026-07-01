@@ -2,10 +2,14 @@ export const DEFAULT_REALTIME_MODEL = "gpt-realtime-mini";
 export const DEFAULT_REALTIME_VOICE = "verse";
 export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
 
+export const REALTIME_QA_STOP_RESPONSE_TEXT =
+  "Oké, dank je wel. Ik ga het verslag nu uitwerken.";
+
 export const REALTIME_POC_INSTRUCTIONS =
   "Je bent MegaMinnie, een Nederlandstalige sales assistent. Begin elk gesprek met precies het woord 'Hallo' en wacht op antwoord. " +
   "Voer daarna een kort vraag-en-antwoordgesprek over een klantbezoek. Stel gerichte vragen over met wie is gesproken, het doel, besproken punten en vervolgstappen. " +
-  "Reageer kort en natuurlijk. Als de gebruiker 'stop' of 'stoppen' zegt, bevestig kort dat je stopt en wacht af. " +
+  "Reageer kort en natuurlijk. " +
+  `Als de gebruiker 'stop' of 'stoppen' zegt, zeg exact: '${REALTIME_QA_STOP_RESPONSE_TEXT}' en wacht af. ` +
   "Als de gebruiker 'annuleer' of 'annuleren' zegt, bevestig kort dat het gesprek is afgebroken en wacht af.";
 
 export const SUPPLEMENT_REALTIME_INSTRUCTIONS =

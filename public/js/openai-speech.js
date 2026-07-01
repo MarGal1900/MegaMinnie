@@ -50,15 +50,17 @@ async function loadSpeechBlob(text) {
 /**
  * Speelt één korte zin af via OpenAI Speech (zelfde stem als voorlezen).
  * @param {string} text
+ * @param {{ playbackRate?: number }} [options]
  * @returns {Promise<void>}
  */
-export async function playOpenAiSpeechOnce(text) {
+export async function playOpenAiSpeechOnce(text, options = {}) {
   const key = String(text || "").replace(/\s+/g, " ").trim();
   if (!key) throw new Error("Lege tekst.");
   const blob = await loadSpeechBlob(key);
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   audio.volume = 1;
+  audio.playbackRate = options.playbackRate ?? TTS_PLAYBACK_RATE;
   try {
     await playAudioElement(audio);
   } finally {
@@ -75,6 +77,21 @@ export async function playOpenAiSpeechOnce(text) {
  */
 
 const TTS_POST_GRACE_MS = 900;
+/**
+ * Volume tijdens "ducking": zodra tijdens actief voorlezen spraak wordt gedetecteerd (VAD
+ * speech_started), wordt het TTS-volume hierheen verlaagd in plaats van de playback volledig
+ * te onderbreken. Zo krijgt de microfoon een veel schoner signaal van bijv. "Correctie" (minder
+ * eigen-echo om doorheen te komen), zonder dat elke valse VAD-trigger (echo van de speaker
+ * zelf) meteen een harde stop/hervat-cyclus veroorzaakt — dat laatste zou voorlezen laten
+ * stotteren. Bij een carkit/losse speaker zonder goede akoestische echo-onderdrukking is dit
+ * de veiligste tussenweg tussen "nooit onderbreken" (huidig gedrag, vereist vaak herhalen) en
+ * "altijd volledig pauzeren" (risico op constant onderbroken voorlezen).
+ */
+const TTS_DUCK_VOLUME = 0.12;
+/** Iets sneller voorlezen (1.0 = normaal). */
+export const TTS_PLAYBACK_RATE = 1.12;
+/** Vraag & Antwoord opening: normale snelheid, zelfde toon als Realtime-interview. */
+export const REALTIME_QA_OPENING_PLAYBACK_RATE = 1.0;
 
 /**
  * @param {HTMLAudioElement} audio
@@ -139,6 +156,7 @@ export function createOpenAiSpeechPlayback(options = {}) {
   let playOneResolve = null;
   let skipNextIndexAdvance = false;
   let playGeneration = 0;
+  let duckVolume = 1;
 
   /** @type {ReturnType<typeof setTimeout> | null} */
   let ttsGraceTimer = null;
@@ -200,12 +218,22 @@ export function createOpenAiSpeechPlayback(options = {}) {
     active = false;
     paused = false;
     playGeneration += 1;
+    duckVolume = 1;
     clearTtsGrace();
     setTtsActive(false);
     resolvePendingPlayOne();
     cleanupAudio();
     chunks = [];
     index = 0;
+  };
+
+  /**
+   * Verlaagt (of herstelt) het TTS-volume zonder de afspeel-lus te onderbreken.
+   * @param {boolean} active
+   */
+  const setDucked = (duckActive) => {
+    duckVolume = duckActive ? TTS_DUCK_VOLUME : 1;
+    if (audio) audio.volume = duckVolume;
   };
 
   const waitWhilePaused = async () => {
@@ -257,6 +285,8 @@ export function createOpenAiSpeechPlayback(options = {}) {
         }
         blobUrl = URL.createObjectURL(blob);
         audio = new Audio(blobUrl);
+        audio.playbackRate = TTS_PLAYBACK_RATE;
+        audio.volume = duckVolume;
         void playAudioElement(audio)
           .then(() => {
             if (generation !== playGeneration) return;
@@ -299,6 +329,7 @@ export function createOpenAiSpeechPlayback(options = {}) {
     if (!active) return false;
     cancelled = false;
     playGeneration += 1;
+    duckVolume = 1;
     syncChunks(newChunks, newIndex);
     cleanupAudio();
     clearTtsGrace();
@@ -416,6 +447,7 @@ export function createOpenAiSpeechPlayback(options = {}) {
 
     syncChunks,
     resumeAfterCorrection,
+    setDucked,
 
     playFrom,
 

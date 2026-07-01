@@ -55,7 +55,14 @@ export const MegaMinnieOutputSchema = z.object({
 
 export type MegaMinnieOutput = z.infer<typeof MegaMinnieOutputSchema>;
 
-export type VisitReportSource = "voice" | "photo" | "interview" | "conversation" | "correction";
+export type VisitReportSource =
+  | "voice"
+  | "photo"
+  | "interview"
+  | "conversation"
+  | "correction"
+  | "task"
+  | "event";
 
 export const ConversationAnalysisSchema = z.object({
   topicsDiscussed: z.array(z.string()).default([]),

@@ -58,7 +58,7 @@ Verplicht schema:
 export function buildUserPrompt(
   rawText: string,
   context?: string,
-  source?: "voice" | "photo" | "interview" | "conversation" | "correction",
+  source?: "voice" | "photo" | "interview" | "conversation" | "correction" | "task" | "event",
 ): string {
   const intro =
     source === "conversation"
@@ -87,7 +87,7 @@ export function buildExtendUserPrompt(
     events: { subject: string; startDateTime: string; endDateTime: string }[];
   },
   supplementRawText: string,
-  supplementSource: "voice" | "photo" | "interview" | "conversation" | "correction",
+  supplementSource: "voice" | "photo" | "interview" | "conversation" | "correction" | "task" | "event",
 ): string {
   if (supplementSource === "correction") {
     // Gesproken correctie-instructie: pas alleen de specifieke aanpassing toe, voeg niets toe.
@@ -107,6 +107,66 @@ export function buildExtendUserPrompt(
       "--- EINDE BESTAAND VERSLAG ---",
       "",
       "--- CORRECTIE-INSTRUCTIE (gesproken door gebruiker) ---",
+      supplementRawText.trim(),
+      "--- EINDE INSTRUCTIE ---",
+      "",
+      "Bestaande taken (JSON):",
+      JSON.stringify(existing.tasks, null, 2),
+      "",
+      "Bestaande agenda-items (JSON):",
+      JSON.stringify(existing.events, null, 2),
+      "",
+      `Datum: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
+    ].join("\n");
+  }
+
+  if (supplementSource === "task") {
+    return [
+      "Je voegt een taak toe aan een BESTAAND bezoekverslag op basis van een gesproken instructie.",
+      "STRIKTE REGELS:",
+      "- Voeg ALLEEN de nieuwe taak toe die in de instructie staat.",
+      "- Wijzig salesforceNote title/body NIET.",
+      "- Wijzig bestaande agenda-items NIET.",
+      "- Verwijder geen bestaande taken.",
+      "- Vul logische datum (activityDate, YYYY-MM-DD) en assignee in (standaard Accountmanager).",
+      "",
+      "--- BESTAAND VERSLAG (titel + body) ---",
+      `Titel: ${existing.title}`,
+      "",
+      existing.body.trim(),
+      "--- EINDE BESTAAND VERSLAG ---",
+      "",
+      "--- TAAK-INSTRUCTIE (gesproken door gebruiker) ---",
+      supplementRawText.trim(),
+      "--- EINDE INSTRUCTIE ---",
+      "",
+      "Bestaande taken (JSON):",
+      JSON.stringify(existing.tasks, null, 2),
+      "",
+      "Bestaande agenda-items (JSON):",
+      JSON.stringify(existing.events, null, 2),
+      "",
+      `Datum: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
+    ].join("\n");
+  }
+
+  if (supplementSource === "event") {
+    return [
+      "Je voegt een agenda-item toe aan een BESTAAND bezoekverslag op basis van een gesproken instructie.",
+      "STRIKTE REGELS:",
+      "- Voeg ALLEEN het nieuwe agenda-item toe dat in de instructie staat.",
+      "- Wijzig salesforceNote title/body NIET.",
+      "- Wijzig bestaande taken NIET.",
+      "- Verwijder geen bestaande agenda-items.",
+      "- Vul startDateTime en endDateTime in als ISO-8601 met tijdzone; minimaal 30 minuten tenzij anders genoemd.",
+      "",
+      "--- BESTAAND VERSLAG (titel + body) ---",
+      `Titel: ${existing.title}`,
+      "",
+      existing.body.trim(),
+      "--- EINDE BESTAAND VERSLAG ---",
+      "",
+      "--- AGENDA-INSTRUCTIE (gesproken door gebruiker) ---",
       supplementRawText.trim(),
       "--- EINDE INSTRUCTIE ---",
       "",

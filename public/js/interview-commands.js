@@ -143,7 +143,32 @@ export function isReviewVoorlezenCommand(text) {
   const normalized = normalizeCommandText(text);
   if (!normalized) return false;
   if (REVIEW_VOORLEZEN_COMMANDS.has(normalized)) return true;
-  return /^voorlezen[.!?,;:]*$/.test(normalized) || /^voor lezen[.!?,;:]*$/.test(normalized);
+  return (
+    /^voorlezen[.!?,;:]*$/.test(normalized) ||
+    /^voor lezen[.!?,;:]*$/.test(normalized) ||
+    /^lees\s+voor[.!?,;:]*$/.test(normalized)
+  );
+}
+
+/** @param {string} text */
+export function isStartVoorlezenCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (isReviewVoorlezenCommand(text)) return true;
+  return (
+    /^start(?:\s+het)?\s+voorlezen[.!?,;:]*$/.test(normalized) ||
+    /^begin(?:\s+met)?\s+voorlezen[.!?,;:]*$/.test(normalized) ||
+    /^lees(?:\s+(?:het\s+)?(?:uitgewerkte\s+)?(?:verslag|tekst))(?:\s+voor)?[.!?,;:]*$/.test(
+      normalized,
+    ) ||
+    /^lees\s+voor(?:\s+(?:het\s+)?(?:uitgewerkte\s+)?(?:verslag|tekst))?[.!?,;:]*$/.test(
+      normalized,
+    ) ||
+    /^graag\s+voorlezen[.!?,;:]*$/.test(normalized) ||
+    /^kun\s+je\s+(?:dit|het(?:\s+uitgewerkte)?\s+(?:verslag|tekst))\s+voor(?:lezen)?[.!?,;:]*$/.test(
+      normalized,
+    )
+  );
 }
 
 /** @param {string} text */
@@ -166,9 +191,213 @@ export function endsWithReviewCorrectieCommand(text) {
   return /\S\s+correctie[.!?,;:]*$/.test(normalized);
 }
 
-/** @returns {"correctie"|"voorlezen"|"stop"|null} */
+/**
+ * Detecteert "correctie" als los woord OP WILLEKEURIGE positie in de uiting — dus ook
+ * in het MIDDEN, bijv. wanneer de TTS-echo van het voorgelezen verslag zowel vóór als ná
+ * het commando wordt meegevangen: "...vervolgafspraak inplannen correctie de naam klopt niet".
+ * Bewust ruimer dan startsWith/endsWith hierboven. Alleen veilig te gebruiken op het moment
+ * dat er nog GEEN correctie-dictee actief is (zie aanroeppunt in app.js) — anders zou dit ook
+ * matchen op legitieme, door de gebruiker gedicteerde inhoud die toevallig het woord
+ * "correctie" bevat (bijv. "de correctie op de polis moet ook mee").
+ * @param {string} text
+ */
+export function containsReviewCorrectieCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /\bcorrectie\b/.test(normalized);
+}
+
+/**
+ * Normaliseert tekst voor TTS-echo-vergelijking (los van commando-normalisatie,
+ * bewust geen Cyrillisch-transliteratie hier — dit is puur woord-overlap).
+ * @param {string} text
+ */
+export function normalizeReviewSpeechEchoText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Puur herbruikbare/testbare versie van de TTS-echo-detectie. Bepaalt of `candidateText`
+ * waarschijnlijk een echo is van het net voorgelezen fragment `lastSpokenChunk`
+ * (bijv. wanneer de microfoon de eigen TTS-stem van de speaker/carkit oppikt).
+ * @param {string} candidateText
+ * @param {string} lastSpokenChunk
+ */
+export function isLikelyReviewSpeechEcho(candidateText, lastSpokenChunk) {
+  const spoken = normalizeReviewSpeechEchoText(lastSpokenChunk);
+  const candidate = normalizeReviewSpeechEchoText(candidateText);
+  if (!spoken || !candidate) return false;
+  if (spoken.includes(candidate) || candidate.includes(spoken)) return true;
+  const spokenWords = new Set(spoken.split(" ").filter((w) => w.length > 3));
+  const candidateWords = candidate.split(" ").filter((w) => w.length > 3);
+  if (!candidateWords.length) return false;
+  const overlap = candidateWords.filter((w) => spokenWords.has(w)).length;
+  return overlap / candidateWords.length >= 0.6;
+}
+
+/** @param {string} text */
+export function startsWithNaturalCreateTaskCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return (
+    /^ik\s+wil\s+(?:dat\s+je\s+)?(?:een\s+)?taak\b/.test(normalized) ||
+    /^zou\s+je\s+(?:een\s+)?taak\b/.test(normalized) ||
+    /^kun\s+je\s+(?:een\s+)?taak\b/.test(normalized) ||
+    /^zet\s+(?:dit\s+)?op\s+de\s+to[\s-]?do\b/.test(normalized)
+  );
+}
+
+/** @param {string} text */
+export function isReviewMaakTaakCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return (
+    /^maak taak[.!?,;:]*$/.test(normalized) ||
+    /^maak een taak aan[.!?,;:]*$/.test(normalized) ||
+    /^maak een taak[.!?,;:]*$/.test(normalized)
+  );
+}
+
+/** @param {string} text */
+export function startsWithReviewMaakTaakCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /^maak(?:\s+een)?\s+taak(?:\s+aan)?\b[.!?,;:]*\s+\S/.test(normalized);
+}
+
+/** @param {string} text */
+export function isReviewMaakAgendaCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return (
+    /^maak agenda[.!?,;:]*$/.test(normalized) ||
+    /^maak een agenda aan[.!?,;:]*$/.test(normalized) ||
+    /^maak een agenda[.!?,;:]*$/.test(normalized)
+  );
+}
+
+/** @param {string} text */
+export function startsWithReviewMaakAgendaCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /^maak(?:\s+een)?\s+agenda(?:\s+aan)?\b[.!?,;:]*\s+\S/.test(normalized);
+}
+
+const OK_WAKE_PREFIX_RE = /^(?:ok(?:e|ay)?)\s+(?:megaminnie|minnie)(?:[.!?,;:]+|\s|$)/;
+const OK_WAKE_ONLY_RE = /^(?:ok(?:e|ay)?)\s+(?:megaminnie|minnie)[.!?,;:]*$/;
+
+/** @param {string} text */
+export function normalizeWakeCommandText(text) {
+  return normalizeCommandText(text)
+    .replace(/\bokay\b/g, "ok")
+    .replace(/\bmega\s+minni?e?\b/g, "megaminnie")
+    .replace(/\bmegan\s+minni?e?\b/g, "megaminnie")
+    .replace(/\bmega\s+mini\b/g, "megaminnie")
+    .replace(/\bmegamini\b/g, "megaminnie")
+    .replace(/\bmeganminni?e?\b/g, "megaminnie")
+    .replace(/\bmegaminn(i|ie)\b/g, "megaminnie");
+}
+
+/** @param {string} text */
+export function hasOkMegaMinnieWakePrefix(text) {
+  const normalized = normalizeWakeCommandText(text);
+  if (!normalized) return false;
+  return OK_WAKE_PREFIX_RE.test(normalized);
+}
+
+/** @param {string} text */
+export function isOkMegaMinnieWakeOnly(text) {
+  const normalized = normalizeWakeCommandText(text);
+  if (!normalized) return false;
+  return OK_WAKE_ONLY_RE.test(normalized);
+}
+
+/**
+ * Verwijdert een leading "Ok MegaMinnie" / "Ok Minnie" prefix.
+ * @param {string} text
+ */
+export function stripOkMegaMinnieWakePrefix(text) {
+  const original = typeof text === "string" ? text : "";
+  const normalized = normalizeWakeCommandText(original);
+  if (!OK_WAKE_PREFIX_RE.test(normalized)) {
+    return original.replace(/\s+/g, " ").trim();
+  }
+  const remainder = normalized
+    .replace(OK_WAKE_PREFIX_RE, "")
+    .replace(/^[.!?,;:\s]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return remainder;
+}
+
+/**
+ * Verwijdert ALLE opeenvolgende leidende "Ok Minnie"-herhalingen, bijv. wanneer iemand het
+ * ongeduldig meerdere keren zegt binnen één door VAD opgevangen uiting ("Ok Minnie. Ok
+ * Minnie.") — stripOkMegaMinnieWakePrefix hierboven verwijdert er maar één, waardoor de rest
+ * als (onherkenbaar) "commando" werd behandeld in plaats van als hernieuwde wake-poging.
+ * @param {string} text
+ */
+export function stripRepeatedOkMegaMinnieWakePrefixes(text) {
+  let current = String(text || "").trim();
+  for (let i = 0; i < 6; i += 1) {
+    if (!hasOkMegaMinnieWakePrefix(current)) break;
+    const stripped = stripOkMegaMinnieWakePrefix(current);
+    if (stripped === current) break;
+    current = stripped;
+  }
+  return current;
+}
+
+/**
+ * @param {string} text
+ * @returns {{ wakeDetected: boolean; wakeOnly: boolean; commandText: string }}
+ */
+export function parseOkMegaMinnieWakeCommand(text) {
+  const original = String(text || "").trim();
+  if (!hasOkMegaMinnieWakePrefix(original)) {
+    return { wakeDetected: false, wakeOnly: false, commandText: original };
+  }
+  const commandText = stripRepeatedOkMegaMinnieWakePrefixes(original);
+  return {
+    wakeDetected: true,
+    wakeOnly: commandText === "" || isOkMegaMinnieWakeOnly(original),
+    commandText,
+  };
+}
+
+const OK_WAKE_ANYWHERE_RE = /\b(?:ok(?:e|ay)?)\s+(?:megaminnie|minnie)\b/;
+
+/**
+ * Detecteert "Ok MegaMinnie" / "Ok Minnie" OP WILLEKEURIGE positie in de uiting — dus ook
+ * wanneer de TTS-echo van het voorgelezen verslag ervoor staat, bijv.
+ * "...vervolgafspraak inplannen ok minnie". hasOkMegaMinnieWakePrefix hierboven vereist dat
+ * het wake-woord aan het BEGIN staat, wat tijdens voorlezen vaak niet het geval is als de
+ * eigen speaker-echo wordt meegevangen — precies dezelfde reden dat "Correctie" soms herhaald
+ * moest worden (zie containsReviewCorrectieCommand). Alleen bedoeld als fallback tijdens
+ * playback; geen vervanging van de striktere prefix-checks voor het algemene geval.
+ * @param {string} text
+ */
+export function containsOkMegaMinnieWake(text) {
+  const normalized = normalizeWakeCommandText(text);
+  if (!normalized) return false;
+  return OK_WAKE_ANYWHERE_RE.test(normalized);
+}
+
+/** @returns {"correctie"|"voorlezen"|"stop"|"maak_taak"|"maak_agenda"|null} */
 export function detectReviewVoiceCommand(text) {
-  if (isReviewVoorlezenCommand(text)) return "voorlezen";
+  if (isStartVoorlezenCommand(text) || isReviewVoorlezenCommand(text)) return "voorlezen";
+  if (isReviewMaakTaakCommand(text)) return "maak_taak";
+  if (startsWithReviewMaakTaakCommand(text) || startsWithNaturalCreateTaskCommand(text)) {
+    return "maak_taak";
+  }
+  if (isReviewMaakAgendaCommand(text)) return "maak_agenda";
+  if (startsWithReviewMaakAgendaCommand(text)) return "maak_agenda";
   if (isReviewCorrectieCommand(text)) return "correctie";
   if (startsWithReviewCorrectieCommand(text)) return "correctie";
   if (endsWithReviewCorrectieCommand(text)) return "correctie";
@@ -176,14 +405,14 @@ export function detectReviewVoiceCommand(text) {
   return null;
 }
 
+const REVIEW_VOICE_COMMAND_PREFIX_RE =
+  /\b(?:maak(?:\s+een)?\s+taak(?:\s+aan)?|maak(?:\s+een)?\s+agenda(?:\s+aan)?|maak taak|maak agenda|correctie|voorlezen|voor lezen|lees(?:\s+(?:het\s+)?(?:uitgewerkte\s+)?(?:verslag|tekst))(?:\s+voor)?|lees\s+voor(?:\s+(?:het\s+)?(?:uitgewerkte\s+)?(?:verslag|tekst))?|graag\s+voorlezen|kun\s+je\s+(?:dit|het(?:\s+uitgewerkte)?\s+(?:verslag|tekst))\s+voor(?:lezen)?|start(?:\s+het)?\s+voorlezen|begin(?:\s+met)?\s+voorlezen|ik\s+wil\s+(?:dat\s+je\s+)?(?:een\s+)?taak|zou\s+je\s+(?:een\s+)?taak|kun\s+je\s+(?:een\s+)?taak|zet\s+(?:dit\s+)?op\s+de\s+to[\s-]?do)\b[.!?,;:]*\s*/gi;
+
 /** @param {string} text */
 export function stripReviewVoiceCommand(text) {
   const original = typeof text === "string" ? text : "";
   let cleaned = original.replace(/\s+/g, " ").trim();
-  cleaned = cleaned
-    .replace(/\b(correctie|voorlezen|voor lezen)\b[.!?,;:]*\s*/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  cleaned = cleaned.replace(REVIEW_VOICE_COMMAND_PREFIX_RE, "").replace(/\s+/g, " ").trim();
   return cleaned;
 }
 

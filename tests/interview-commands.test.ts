@@ -9,6 +9,9 @@ import {
   isRealtimeQaCancelCommand,
   isRealtimeQaStopCommand,
   parseAnswerTranscript,
+  parseOkMegaMinnieWakeCommand,
+  normalizeWakeCommandText,
+  stripOkMegaMinnieWakePrefix,
   stripReviewVoiceCommand,
 } from "../public/js/interview-commands.js";
 
@@ -116,6 +119,54 @@ describe("review playback voice commands", () => {
     expect(detectReviewVoiceCommand("stoppen")).toBe("stop");
   });
 
+  it("herkent maak taak en maak agenda", () => {
+    expect(detectReviewVoiceCommand("maak taak")).toBe("maak_taak");
+    expect(detectReviewVoiceCommand("Maak taak.")).toBe("maak_taak");
+    expect(detectReviewVoiceCommand("Maak taak offerte opsturen voor volgende week")).toBe(
+      "maak_taak",
+    );
+    expect(detectReviewVoiceCommand("Maak een taak aan")).toBe("maak_taak");
+    expect(detectReviewVoiceCommand("Maak een taak aan klant bellen")).toBe("maak_taak");
+    expect(detectReviewVoiceCommand("maak agenda")).toBe("maak_agenda");
+    expect(detectReviewVoiceCommand("Maak agenda afspraak dinsdag 14 uur")).toBe("maak_agenda");
+    expect(detectReviewVoiceCommand("Maak een agenda aan")).toBe("maak_agenda");
+    expect(detectReviewVoiceCommand("Maak een agenda aan afspraak volgende week")).toBe(
+      "maak_agenda",
+    );
+  });
+
+  it("herkent natuurlijke voorlees-commando's", () => {
+    expect(detectReviewVoiceCommand("Lees voor")).toBe("voorlezen");
+    expect(detectReviewVoiceCommand("Lees het verslag voor")).toBe("voorlezen");
+    expect(detectReviewVoiceCommand("lees het verslag")).toBe("voorlezen");
+    expect(detectReviewVoiceCommand("Lees het uitgewerkte verslag voor")).toBe("voorlezen");
+    expect(detectReviewVoiceCommand("Graag voorlezen")).toBe("voorlezen");
+  });
+
+  it("herkent natuurlijke taak-commando's", () => {
+    expect(detectReviewVoiceCommand("Ik wil dat je een taak aanmaakt")).toBe("maak_taak");
+    expect(detectReviewVoiceCommand("Zou je een taak willen aanmaken klant bellen")).toBe(
+      "maak_taak",
+    );
+  });
+
+  it("negeert inhoudelijke zinnen met taak of agenda", () => {
+    expect(detectReviewVoiceCommand("we moeten een taak maken voor morgen")).toBe(null);
+    expect(detectReviewVoiceCommand("zet dit op de agenda van de klant")).toBe(null);
+  });
+
+  it("strippt maak taak en maak agenda uit spraaktekst", () => {
+    expect(stripReviewVoiceCommand("Maak taak offerte opsturen")).toBe("offerte opsturen");
+    expect(stripReviewVoiceCommand("Maak een taak aan klant bellen")).toBe("klant bellen");
+    expect(stripReviewVoiceCommand("Maak agenda afspraak dinsdag 14 uur")).toBe(
+      "afspraak dinsdag 14 uur",
+    );
+    expect(stripReviewVoiceCommand("Maak een agenda aan afspraak dinsdag")).toBe(
+      "afspraak dinsdag",
+    );
+    expect(stripReviewVoiceCommand("Lees het verslag voor")).toBe("");
+  });
+
   it("negeert inhoudelijke zinnen", () => {
     expect(detectReviewVoiceCommand("de correctie staat in alinea twee")).toBe(null);
     expect(detectReviewVoiceCommand("kunnen we dit voorlezen aan de klant")).toBe(null);
@@ -182,6 +233,7 @@ describe("review playback voice commands", () => {
     expect(stripReviewVoiceCommand("Correctie. De vergadering is op dinsdag.")).toBe(
       "De vergadering is op dinsdag.",
     );
+    expect(stripReviewVoiceCommand("Correctie de datum is morgen")).toBe("de datum is morgen");
     // Standalone → lege remainder (activestatuscheck in maybeHandleReviewVoiceCommand)
     expect(stripReviewVoiceCommand("Correctie")).toBe("");
     expect(stripReviewVoiceCommand("Correctie.")).toBe("");
@@ -269,6 +321,52 @@ describe("review playback voice commands", () => {
       .toBe("De naam is Jan Jansen.");
     expect(stripReviewVoiceCommand("Taak 3 het afwijzen van de offerte Correctie").trim())
       .toBe("Taak 3 het afwijzen van de offerte");
+  });
+});
+
+describe("Ok MegaMinnie wake phrase", () => {
+  it("herkent wake prefix varianten", () => {
+    expect(parseOkMegaMinnieWakeCommand("Ok MegaMinnie").wakeOnly).toBe(true);
+    expect(parseOkMegaMinnieWakeCommand("Ok Minnie").wakeOnly).toBe(true);
+    expect(parseOkMegaMinnieWakeCommand("Oké MegaMinnie.").wakeOnly).toBe(true);
+    expect(parseOkMegaMinnieWakeCommand("oke megaminnie").wakeDetected).toBe(true);
+  });
+
+  it("splitst wake prefix en commando", () => {
+    expect(parseOkMegaMinnieWakeCommand("Ok MegaMinnie, voorlezen")).toMatchObject({
+      wakeDetected: true,
+      wakeOnly: false,
+      commandText: "voorlezen",
+    });
+    expect(parseOkMegaMinnieWakeCommand("Ok Minnie, lees voor")).toMatchObject({
+      wakeDetected: true,
+      wakeOnly: false,
+      commandText: "lees voor",
+    });
+    expect(parseOkMegaMinnieWakeCommand("Oké MegaMinnie maak taak offerte sturen")).toMatchObject({
+      wakeDetected: true,
+      wakeOnly: false,
+      commandText: "maak taak offerte sturen",
+    });
+  });
+
+  it("herkent STT-varianten met spatie of Megan", () => {
+    expect(parseOkMegaMinnieWakeCommand("Ok mega minnie").wakeOnly).toBe(true);
+    expect(parseOkMegaMinnieWakeCommand("Okay Megan Minnie, stop").wakeDetected).toBe(true);
+    expect(parseOkMegaMinnieWakeCommand("Ok mega mini voorlezen")).toMatchObject({
+      wakeDetected: true,
+      commandText: "voorlezen",
+    });
+    expect(parseOkMegaMinnieWakeCommand("Ok MeganMinnie").wakeOnly).toBe(true);
+    expect(normalizeWakeCommandText("Okay Megan Minnie")).toBe("ok megaminnie");
+  });
+
+  it("laat gewone zinnen ongemoeid", () => {
+    expect(parseOkMegaMinnieWakeCommand("hey megaminnie")).toMatchObject({
+      wakeDetected: false,
+      wakeOnly: false,
+    });
+    expect(stripOkMegaMinnieWakePrefix("voorlezen")).toBe("voorlezen");
   });
 });
 

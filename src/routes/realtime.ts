@@ -252,7 +252,7 @@ realtimeRouter.post("/session/listen", async (_req, res, next) => {
     const transcriptionModel = getRealtimeTranscriptionModel();
     const instructions = getListenRealtimeInstructions();
     // Luister-sessie: VAD + transcriptie maar geen automatische AI-responses.
-    // Hogere VAD-drempel (0.7) en ruisonderdrukking om TTS-echo te filteren.
+    // VAD-drempel (0.55) + ruisonderdrukking; echo tijdens voorlezen via software gefilterd.
     const payload = {
       session: {
         type: "realtime",
@@ -263,7 +263,7 @@ realtimeRouter.post("/session/listen", async (_req, res, next) => {
             turn_detection: {
               type: "server_vad",
               create_response: false,
-              threshold: 0.7,
+              threshold: 0.55,
               silence_duration_ms: 700,
             },
             transcription: { model: transcriptionModel, language: "nl" },
