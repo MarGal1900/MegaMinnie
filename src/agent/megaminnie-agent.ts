@@ -1,5 +1,6 @@
 import {
   buildExtendUserPrompt,
+  buildStandaloneCaptureUserPrompt,
   buildUserPrompt,
   MEGAMINNIE_SYSTEM_PROMPT,
 } from "./megaminnie-prompt.js";
@@ -61,6 +62,30 @@ export async function runMegaMinnieExtendAgent(
       supplementRawText,
       supplementSource,
     ),
+  );
+
+  const json = normalizeMegaMinnieJson(parseJsonFromLlmResponse(content));
+  const parsed = MegaMinnieOutputSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(
+      `MegaMinnie-antwoord onvolledig: ${formatMegaMinnieValidationError(parsed.error.issues)}`,
+    );
+  }
+  return parsed.data;
+}
+
+/** Losse taak/agenda-item via spraak, zonder bestaand bezoekverslag (zie visit-report-pipeline.ts). */
+export async function runMegaMinnieStandaloneCaptureAgent(
+  rawText: string,
+  kind: "task" | "event",
+): Promise<MegaMinnieOutput> {
+  if (!rawText.trim()) {
+    throw new Error("Geen gesproken instructie ontvangen. Probeer opnieuw.");
+  }
+
+  const content = await createJsonCompletion(
+    MEGAMINNIE_SYSTEM_PROMPT,
+    buildStandaloneCaptureUserPrompt(rawText, kind),
   );
 
   const json = normalizeMegaMinnieJson(parseJsonFromLlmResponse(content));

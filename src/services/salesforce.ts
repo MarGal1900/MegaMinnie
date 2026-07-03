@@ -123,7 +123,6 @@ export async function syncToSalesforce(
       Description: event.description,
       StartDateTime: event.startDateTime,
       EndDateTime: event.endDateTime,
-      Location: event.location,
       WhatId: recordId,
       OwnerId: ownerId,
     });

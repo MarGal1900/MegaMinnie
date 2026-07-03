@@ -241,6 +241,40 @@ export function isLikelyReviewSpeechEcho(candidateText, lastSpokenChunk) {
   return overlap / candidateWords.length >= 0.6;
 }
 
+/**
+ * Strip een herkend echo-voorvoegsel (bijv. de eigen TTS-stem van "Wat kan ik voor je doen?")
+ * van het BEGIN van `candidateText` en geeft de rest terug. Nodig omdat de mic tijdens de
+ * ack-bevestiging bewust AAN blijft (zie voice-command-wake.js): als de gebruiker zonder
+ * duidelijke stilte meteen na de echo zijn commando uitspreekt, komt dat soms als ÉÉN
+ * STT-fragment binnen ("wat kan ik voor je doen maak een agenda aan"). isLikelyReviewSpeechEcho
+ * hierboven classificeert zo'n fragment als "puur echo" (de echo-tekst zit er letterlijk in),
+ * waardoor het HELE fragment — inclusief het echte commando erna — werd weggegooid. Deze
+ * functie strippt alleen het overeenkomende voorvoegsel; de rest blijft over als commando.
+ * @param {string} candidateText
+ * @param {string} lastSpokenChunk
+ * @returns {string} de tekst ná het echo-voorvoegsel, of de oorspronkelijke (getrimde) tekst
+ *   als er geen voorvoegsel-overeenkomst is gevonden.
+ */
+export function stripLeadingSpeechEcho(candidateText, lastSpokenChunk) {
+  const original = String(candidateText || "").trim();
+  const rawWords = original.split(/\s+/).filter(Boolean);
+  const spokenWords = normalizeReviewSpeechEchoText(lastSpokenChunk)
+    .split(" ")
+    .filter(Boolean);
+  if (!rawWords.length || !spokenWords.length) return original;
+
+  let i = 0;
+  while (
+    i < rawWords.length &&
+    i < spokenWords.length &&
+    normalizeReviewSpeechEchoText(rawWords[i]) === spokenWords[i]
+  ) {
+    i++;
+  }
+  if (i === 0) return original;
+  return rawWords.slice(i).join(" ").trim();
+}
+
 /** @param {string} text */
 export function startsWithNaturalCreateTaskCommand(text) {
   const normalized = normalizeCommandText(text);
@@ -294,14 +328,29 @@ const OK_WAKE_ONLY_RE = /^(?:ok(?:e|ay)?)\s+(?:megaminnie|minnie)[.!?,;:]*$/;
 
 /** @param {string} text */
 export function normalizeWakeCommandText(text) {
-  return normalizeCommandText(text)
-    .replace(/\bokay\b/g, "ok")
-    .replace(/\bmega\s+minni?e?\b/g, "megaminnie")
-    .replace(/\bmegan\s+minni?e?\b/g, "megaminnie")
-    .replace(/\bmega\s+mini\b/g, "megaminnie")
-    .replace(/\bmegamini\b/g, "megaminnie")
-    .replace(/\bmeganminni?e?\b/g, "megaminnie")
-    .replace(/\bmegaminn(i|ie)\b/g, "megaminnie");
+  return (
+    normalizeCommandText(text)
+      // STT-varianten van "ok": "okay", "oké" (accent al gestript door normalizeCommandText
+      // → "oke"), "okee", en "O.K." (interpunctie al gestript → "o k"). Zonder deze
+      // normalisatie viel een groot deel van de uitingen buiten de wake-regexes en moest
+      // "Ok Minnie" meerdere keren gezegd worden voordat er een "schone" transcriptie
+      // tussen zat — dé oorzaak van het 5-6x-roepen-probleem op het hoofdscherm.
+      .replace(/\bo k\b/g, "ok")
+      .replace(/\boke{1,2}\b/g, "ok")
+      .replace(/\bokay\b/g, "ok")
+      .replace(/\bmega\s+minni?e?\b/g, "megaminnie")
+      .replace(/\bmega\s+(?:minny|minie|miny)\b/g, "megaminnie")
+      .replace(/\bmegan\s+minni?e?\b/g, "megaminnie")
+      .replace(/\bmega\s+mini\b/g, "megaminnie")
+      .replace(/\bmegamini\b/g, "megaminnie")
+      .replace(/\bmegaminny\b/g, "megaminnie")
+      .replace(/\bmeganminni?e?\b/g, "megaminnie")
+      .replace(/\bmegaminn(i|ie)\b/g, "megaminnie")
+      // STT-varianten van "minnie" ("mini", "minny", "minni", "minie", "miny") worden alleen
+      // genormaliseerd DIRECT na "ok", zodat legitieme tekst met bijv. het woord "mini"
+      // ("de mini presentatie") ongemoeid blijft.
+      .replace(/\bok (?:mini|minni|minny|minie|miny)\b/g, "ok minnie")
+  );
 }
 
 /** @param {string} text */
@@ -387,6 +436,32 @@ export function containsOkMegaMinnieWake(text) {
   const normalized = normalizeWakeCommandText(text);
   if (!normalized) return false;
   return OK_WAKE_ANYWHERE_RE.test(normalized);
+}
+
+/**
+ * Vindt "Ok MegaMinnie" / "Ok Minnie" op WILLEKEURIGE positie in de uiting en geeft de tekst
+ * NA het wake-woord terug als commandotekst. Nodig voor het idle-/hoofdschermgeval: als de
+ * VAD ruis of een aarzeling vóór het wake-woord meevangt ("eh, ok minnie"), matchte de
+ * ^-anchored prefix-check niet en werd de hele uiting genegeerd — óók een oorzaak van het
+ * meerdere-keren-roepen-probleem. Herhaalde wakes in de rest ("ok minnie ok minnie") worden
+ * volledig weggestript. De teruggegeven commandText is genormaliseerd (lowercase, zonder
+ * interpunctie) — alle commandodetectors normaliseren zelf ook, dus dat is verenigbaar.
+ * @param {string} text
+ * @returns {{ wakeDetected: boolean; wakeOnly: boolean; commandText: string }}
+ */
+export function extractOkMegaMinnieWakeAnywhere(text) {
+  const original = String(text || "").trim();
+  const normalized = normalizeWakeCommandText(original);
+  if (!normalized) return { wakeDetected: false, wakeOnly: false, commandText: original };
+  const match = OK_WAKE_ANYWHERE_RE.exec(normalized);
+  if (!match) return { wakeDetected: false, wakeOnly: false, commandText: original };
+  const afterWake = normalized.slice(match.index + match[0].length).trim();
+  const commandText = stripRepeatedOkMegaMinnieWakePrefixes(afterWake);
+  return {
+    wakeDetected: true,
+    wakeOnly: commandText === "",
+    commandText,
+  };
 }
 
 /** @returns {"correctie"|"voorlezen"|"stop"|"maak_taak"|"maak_agenda"|null} */

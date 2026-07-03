@@ -12,6 +12,15 @@ const OPENING_PROMPT =
   `Zeg nu hardop uitsluitend het ene woord "${REALTIME_QA_OPENING_TEXT}". ` +
   "Geen andere woorden, geen extra zin. Wacht daarna stil tot de gebruiker antwoordt.";
 const OPENING_GREETING_FALLBACK_MS = 1500;
+/**
+ * Android/Chrome schakelt de audio-output naar een zachtere "communicatie"-modus zodra de
+ * microfoon (met echoCancellation/autoGainControl) volledig actief is voor de duplex-sessie.
+ * De opening ("Hallo") speelt daardoor merkbaar luider dan de vragen die erna komen, terwijl
+ * dezelfde <audio>-output op volume 1 staat. Versterk de ontvangen stem via een Web Audio
+ * GainNode om dat verschil te compenseren; alleen actief voor de volledige Vraag & Antwoord-
+ * sessie (niet voor de stille listen-only correctieflow).
+ */
+const REALTIME_QA_OUTPUT_GAIN = 1.6;
 const CORRECTION_OPENING_PROMPT =
   "De gebruiker wil het voorgelezen verslag corrigeren of aanvullen. " +
   "Begin met exact te vragen: 'Wat wil je corrigeren of aanvullen?' " +
@@ -166,6 +175,12 @@ export function createRealtimeInterviewController(options) {
   let remoteAudio = null;
   /** @type {MediaStream | null} */
   let mutedRemoteStream = null;
+  /** @type {AudioContext | null} */
+  let outputAudioCtx = null;
+  /** @type {GainNode | null} */
+  let outputGainNode = null;
+  /** @type {MediaStreamAudioSourceNode | null} */
+  let outputSourceNode = null;
   let correctionDialogueActive = false;
   let active = false;
   let connecting = false;
@@ -273,6 +288,47 @@ export function createRealtimeInterviewController(options) {
     return remoteAudio;
   };
 
+  const teardownOutputGain = () => {
+    try {
+      outputSourceNode?.disconnect();
+    } catch {
+      /* noop */
+    }
+    try {
+      outputGainNode?.disconnect();
+    } catch {
+      /* noop */
+    }
+    outputSourceNode = null;
+    outputGainNode = null;
+  };
+
+  /**
+   * Bouwt (of hergebruikt) een Web Audio-graph die de meegegeven stream versterkt af te
+   * spelen — zie REALTIME_QA_OUTPUT_GAIN hierboven. Bij falen (bv. geen AudioContext-support)
+   * blijft de normale <audio>-output gewoon werken; geeft daarom true terug alleen als de
+   * versterkte graph daadwerkelijk actief is (en de <audio>-track dus gedempt mag worden).
+   * @param {MediaStream} stream
+   * @returns {boolean}
+   */
+  const attachOutputGain = (stream) => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return false;
+      if (!outputAudioCtx) outputAudioCtx = new AudioCtx();
+      if (outputAudioCtx.state === "suspended") void outputAudioCtx.resume();
+      teardownOutputGain();
+      outputSourceNode = outputAudioCtx.createMediaStreamSource(stream);
+      outputGainNode = outputAudioCtx.createGain();
+      outputGainNode.gain.value = REALTIME_QA_OUTPUT_GAIN;
+      outputSourceNode.connect(outputGainNode).connect(outputAudioCtx.destination);
+      return true;
+    } catch {
+      teardownOutputGain();
+      return false;
+    }
+  };
+
   const sendOpeningGreeting = () => {
     if (skipOpeningGreeting || listenOnly || passiveListen || openingGreetingSent) return false;
     if (!dataChannel || dataChannel.readyState !== "open") return false;
@@ -339,6 +395,15 @@ export function createRealtimeInterviewController(options) {
   };
 
   const closeRemoteAudio = () => {
+    teardownOutputGain();
+    if (outputAudioCtx) {
+      try {
+        void outputAudioCtx.close();
+      } catch {
+        /* noop */
+      }
+      outputAudioCtx = null;
+    }
     if (!remoteAudio) return;
     try {
       remoteAudio.pause();
@@ -596,7 +661,12 @@ export function createRealtimeInterviewController(options) {
       }
       remoteTrackReady = true;
       const audio = ensureRemoteAudio();
-      audio.srcObject = event.streams[0];
+      const stream = event.streams[0];
+      audio.srcObject = stream;
+      // Versterk de output via Web Audio zodat Vraag & Antwoord even luid klinkt als de
+      // "Hallo"-opening (zie REALTIME_QA_OUTPUT_GAIN). Lukt dat niet, dan blijft de gewone
+      // <audio>-uitvoer op normaal volume actief.
+      audio.muted = stream ? attachOutputGain(stream) : false;
       void audio.play().catch(() => {
         setStatus("Assistent antwoordt…");
       });

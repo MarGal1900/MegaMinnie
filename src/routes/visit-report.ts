@@ -6,6 +6,7 @@ import {
 } from "../types/visit-report.js";
 import { rateLimitTranscribe, rateLimitUploads } from "../lib/rate-limit.js";
 import {
+  createStandaloneCapture,
   extendVisitReport,
   processVisitReport,
   processVisitReportFromPhotos,
@@ -323,6 +324,32 @@ visitReportRouter.post(
     }
   },
 );
+
+/**
+ * POST /api/visit-report/standalone — losse taak of agenda-item via spraak, ZONDER bestaand
+ * bezoekverslag (bijv. "Ok Minnie, maak een taak aan" op het startscherm). Anders dan
+ * /extend hierboven is er geen 'existing' vereist — dit maakt voor het eerst een (minimale)
+ * notitie + precies één taak of agenda-item aan.
+ */
+visitReportRouter.post("/standalone", rateLimitUploads, async (req, res, next) => {
+  try {
+    const { text, kind } = req.body ?? {};
+    if (typeof text !== "string" || !text.trim()) {
+      res.status(400).json({ error: "Veld 'text' is verplicht" });
+      return;
+    }
+    if (kind !== "task" && kind !== "event") {
+      res.status(400).json({ error: "Veld 'kind' moet 'task' of 'event' zijn" });
+      return;
+    }
+
+    const result = await createStandaloneCapture({ rawText: text.trim(), kind });
+
+    res.json({ ...result, transcript: text.trim() });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /** POST /api/visit-report/text — tekst (getypt, geplakt of uit document) */
 visitReportRouter.post("/text", rateLimitUploads, async (req, res, next) => {

@@ -1,4 +1,8 @@
-import { runMegaMinnieAgent, runMegaMinnieExtendAgent } from "../agent/megaminnie-agent.js";
+import {
+  runMegaMinnieAgent,
+  runMegaMinnieExtendAgent,
+  runMegaMinnieStandaloneCaptureAgent,
+} from "../agent/megaminnie-agent.js";
 import { runMegaMinnieFromPhotos } from "../agent/megaminnie-from-photos.js";
 import { prepareImageForApi } from "../lib/image-prepare.js";
 import { getPhotoPipeline } from "../lib/vision-config.js";
@@ -100,6 +104,29 @@ export async function extendVisitReport(input: {
     transcript:
       input.supplementSource === "voice" ? input.supplementRawText : undefined,
     extended: true,
+    megaMinnie,
+    salesforceLink,
+  };
+}
+
+/**
+ * Losse taak/agenda-item via spraak, zonder bestaand bezoekverslag — bijv. "Ok Minnie, maak
+ * een taak aan" op het startscherm. Anders dan extendVisitReport hierboven is er geen
+ * `existing` om bij te werken; er wordt hier voor het eerst een (minimale) notitie + taak of
+ * agenda-item aangemaakt. Synct bewust niet naar Salesforce — koppelen is een losse,
+ * handmatige vervolgstap (zie salesforceLink), net als bij een normaal gegenereerd verslag.
+ */
+export async function createStandaloneCapture(input: {
+  rawText: string;
+  kind: "task" | "event";
+}): Promise<VisitReportResult> {
+  const megaMinnie = await runMegaMinnieStandaloneCaptureAgent(input.rawText, input.kind);
+
+  const salesforceLink = await matchSalesforceFromHints(megaMinnie.customer);
+
+  return {
+    source: input.kind,
+    rawInput: input.rawText,
     megaMinnie,
     salesforceLink,
   };

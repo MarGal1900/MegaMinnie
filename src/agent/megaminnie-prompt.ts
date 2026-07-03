@@ -213,3 +213,32 @@ export function buildExtendUserPrompt(
     `Datum bijwerking: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
   ].join("\n");
 }
+
+/**
+ * Losse taak of agenda-item aanmaken via spraak, ZONDER dat er al een bezoekverslag bestaat
+ * (bijv. "Ok Minnie, maak een taak aan" op het startscherm). In tegenstelling tot
+ * buildExtendUserPrompt hierboven is er geen bestaande titel/body om te bewaren — de notitie
+ * wordt hier voor het eerst aangemaakt, bewust kort en zonder verzonnen bezoekinhoud.
+ */
+export function buildStandaloneCaptureUserPrompt(
+  rawText: string,
+  kind: "task" | "event",
+): string {
+  const label = kind === "task" ? "TAAK" : "AGENDA-ITEM";
+  return [
+    `Je maakt een losse ${label.toLowerCase()} aan op basis van een gesproken instructie. Er is GEEN bezoekverslag — verzin er ook geen.`,
+    "STRIKTE REGELS:",
+    `- Vul ALLEEN de ${kind === "task" ? "tasks-array met precies één taak" : "events-array met precies één agenda-item"} op basis van de instructie.`,
+    `- Laat de ${kind === "task" ? "events" : "tasks"}-array leeg.`,
+    "- salesforceNote.title: kort, bijv. 'Losse taak: <onderwerp>' of 'Losse afspraak: <onderwerp>'.",
+    "- salesforceNote.body: één korte zin die de instructie samenvat — geen bezoekverslag-structuur, geen kopjes.",
+    "- Verzin geen bezoek, gesprek, klantcontext of details die niet zijn genoemd.",
+    "- Als in de instructie een naam van een klant/contactpersoon wordt genoemd, zet die in het veld customer.contactName (of accountName voor een bedrijfsnaam); anders customer weglaten.",
+    "",
+    `--- ${label}-INSTRUCTIE (gesproken door gebruiker) ---`,
+    rawText.trim(),
+    `--- EINDE INSTRUCTIE ---`,
+    "",
+    `Datum: ${new Date().toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" })}`,
+  ].join("\n");
+}

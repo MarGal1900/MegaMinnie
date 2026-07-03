@@ -237,13 +237,11 @@ export function normalizeMegaMinnieJson(raw: unknown): unknown {
         const start = new Date(startDateTime);
         endDateTime = new Date(start.getTime() + 30 * 60 * 1000).toISOString();
       }
-      const location = trimString(event.location);
       return {
         subject,
         description: trimString(event.description) || undefined,
         startDateTime,
         endDateTime,
-        location: location || undefined,
       };
     })
     .filter(Boolean);

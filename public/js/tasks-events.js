@@ -47,34 +47,35 @@ function buildTaskCardHtml(item, committed, defaultAssignee) {
         <span class="field__label">Verantwoordelijke</span>
         <input type="text" class="task-assignee" value="${escapeHtml(assignee)}" />
       </label>
-      <label class="field field--compact">
-        <span class="field__label">Datum</span>
-        <input type="date" class="task-date" lang="nl" value="${escapeHtml(activityDate)}" />
-      </label>
-      <label class="field field--compact">
-        <span class="field__label">Prioriteit</span>
-        <select class="task-priority">
-          ${TASK_PRIORITIES.map((p) => `<option value="${p}"${p === item.priority ? " selected" : ""}>${p}</option>`).join("")}
-        </select>
-      </label>
-      <label class="field field--compact">
-        <span class="field__label">Status</span>
-        <select class="task-status">
-          ${TASK_STATUSES.map((s) => `<option value="${s}"${s === item.status ? " selected" : ""}>${s}</option>`).join("")}
-        </select>
-      </label>
+      <div class="card-list__row">
+        <label class="field field--compact">
+          <span class="field__label">Datum</span>
+          <input type="date" class="task-date" lang="nl" value="${escapeHtml(activityDate)}" />
+        </label>
+        <label class="field field--compact">
+          <span class="field__label">Prioriteit</span>
+          <select class="task-priority">
+            ${TASK_PRIORITIES.map((p) => `<option value="${p}"${p === item.priority ? " selected" : ""}>${p}</option>`).join("")}
+          </select>
+        </label>
+        <label class="field field--compact">
+          <span class="field__label">Status</span>
+          <select class="task-status">
+            ${TASK_STATUSES.map((s) => `<option value="${s}"${s === item.status ? " selected" : ""}>${s}</option>`).join("")}
+          </select>
+        </label>
+      </div>
       <label class="field field--compact field--full">
         <span class="field__label">Beschrijving</span>
-        <textarea class="task-description" rows="2">${escapeHtml(String(item.description ?? ""))}</textarea>
+        <textarea class="task-description" rows="4">${escapeHtml(String(item.description ?? ""))}</textarea>
       </label>
     </div>`;
 }
 
 function buildEventCardHtml(item, committed) {
   const commitBtn = committed ? "" : buildCommitButton("commit-event");
-  const startDate = isoDatePartFromDateTime(String(item.startDateTime ?? ""));
+  const eventDate = isoDatePartFromDateTime(String(item.startDateTime ?? ""));
   const startTime = timeValueFromIso(String(item.startDateTime ?? ""));
-  const endDate = isoDatePartFromDateTime(String(item.endDateTime ?? ""));
   const endTime = timeValueFromIso(String(item.endDateTime ?? ""));
 
   return `
@@ -92,18 +93,12 @@ function buildEventCardHtml(item, committed) {
       </label>
       <div class="card-list__row">
         <label class="field field--compact">
-          <span class="field__label">Startdatum</span>
-          <input type="date" class="event-start-date" lang="nl" value="${escapeHtml(startDate)}" />
+          <span class="field__label">Datum</span>
+          <input type="date" class="event-date" lang="nl" value="${escapeHtml(eventDate)}" />
         </label>
         <label class="field field--compact">
           <span class="field__label">Starttijd</span>
           ${buildNlTimeFieldHtml("event-start-time", startTime)}
-        </label>
-      </div>
-      <div class="card-list__row">
-        <label class="field field--compact">
-          <span class="field__label">Einddatum</span>
-          <input type="date" class="event-end-date" lang="nl" value="${escapeHtml(endDate)}" />
         </label>
         <label class="field field--compact">
           <span class="field__label">Eindtijd</span>
@@ -111,12 +106,8 @@ function buildEventCardHtml(item, committed) {
         </label>
       </div>
       <label class="field field--compact field--full">
-        <span class="field__label">Locatie</span>
-        <input type="text" class="event-location" value="${escapeHtml(String(item.location ?? ""))}" />
-      </label>
-      <label class="field field--compact field--full">
         <span class="field__label">Beschrijving</span>
-        <textarea class="event-description" rows="2">${escapeHtml(String(item.description ?? ""))}</textarea>
+        <textarea class="event-description" rows="4">${escapeHtml(String(item.description ?? ""))}</textarea>
       </label>
     </div>`;
 }
@@ -182,20 +173,17 @@ function readTaskFromCard(card, defaultAssignee) {
 
 /** @param {HTMLElement} card */
 function readEventFromCard(card) {
-  const startDate = card.querySelector(".event-start-date")?.value ?? "";
+  const date = card.querySelector(".event-date")?.value ?? "";
   const startTime = card.querySelector(".event-start-time")?.value ?? "";
-  const endDate = card.querySelector(".event-end-date")?.value ?? "";
   const endTime = card.querySelector(".event-end-time")?.value ?? "";
 
   return {
     subject: card.querySelector(".event-subject")?.value.trim() ?? "",
-    startDateTime: combineIsoDateAndTime(startDate, startTime),
-    endDateTime: combineIsoDateAndTime(endDate, endTime),
-    startDateInput: startDate.trim(),
+    startDateTime: combineIsoDateAndTime(date, startTime),
+    endDateTime: combineIsoDateAndTime(date, endTime),
+    dateInput: date.trim(),
     startTimeInput: startTime.trim(),
-    endDateInput: endDate.trim(),
     endTimeInput: endTime.trim(),
-    location: card.querySelector(".event-location")?.value.trim() || undefined,
     description: card.querySelector(".event-description")?.value.trim() || undefined,
     committed: card.dataset.committed === "true",
   };
@@ -211,18 +199,11 @@ function validateTask(task) {
 /** @param {Record<string, unknown>} event */
 function validateEvent(event) {
   if (!event.subject) return "Vul een onderwerp in voor het agenda-item.";
-  if (!event.startDateInput || !event.startTimeInput) {
-    return "Vul startdatum en starttijd in.";
-  }
-  if (!event.startDateTime) {
-    return "Vul een geldige startdatum en starttijd in.";
-  }
-  if (!event.endDateInput || !event.endTimeInput) {
-    return "Vul einddatum en eindtijd in.";
-  }
-  if (!event.endDateTime) {
-    return "Vul een geldige einddatum en eindtijd in.";
-  }
+  if (!event.dateInput) return "Vul een datum in voor het agenda-item.";
+  if (!event.startTimeInput) return "Vul een starttijd in.";
+  if (!event.startDateTime) return "Vul een geldige datum en starttijd in.";
+  if (!event.endTimeInput) return "Vul een eindtijd in.";
+  if (!event.endDateTime) return "Vul een geldige datum en eindtijd in.";
   return "";
 }
 
@@ -260,7 +241,6 @@ export function collectTasksEventsFromUi(megaMinnie, defaultAssignee = "Accountm
       subject: event.subject,
       startDateTime: event.startDateTime,
       endDateTime: event.endDateTime,
-      location: event.location,
       description: event.description,
     });
   });

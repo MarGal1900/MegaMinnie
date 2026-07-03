@@ -74,7 +74,7 @@ import { initShareReportEmail } from "./share-report-email.js";
 import { OnboardingTour } from "./onboarding.js";
 
 /** @typedef {{ subject: string; description?: string; activityDate: string; priority: string; status: string; assignee?: string; ownerId?: string }} Task */
-/** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string; location?: string }} Event */
+/** @typedef {{ subject: string; description?: string; startDateTime: string; endDateTime: string }} Event */
 /** @typedef {{ accountName?: string; contactName?: string; email?: string; phone?: string; opportunityName?: string }} CustomerHints */
 /** @typedef {{ id: string; type: string; name: string; subtitle?: string; score: number }} SalesforceRecordHit */
 /** @typedef {{ configured: boolean; extractedCustomer?: CustomerHints; suggestions: SalesforceRecordHit[]; autoSelected: SalesforceRecordHit | null }} SalesforceLinkResult */
@@ -402,6 +402,7 @@ const inputPanel = document.querySelector(".panel--input");
 const dropOverlay = $("drop-overlay");
 const dropOverlayText = $("drop-overlay-text");
 const inputSummary = $("input-summary");
+const wakeStatus = $("wake-status");
 const textInput = $("text-input");
 const manualPanel = $("manual-panel");
 const btnManual = $("btn-manual");
@@ -1708,10 +1709,8 @@ function buildReviewSpeechPlan() {
   document.querySelectorAll("#events-list .card-list__item").forEach((li, i) => {
     const subject = li.querySelector(".event-subject")?.value.trim();
     if (!subject) return;
-    const location = li.querySelector(".event-location")?.value.trim();
     const desc = li.querySelector(".event-description")?.value.trim();
     let line = `Agenda-item ${i + 1}: ${subject}`;
-    if (location) line += `, locatie ${location}`;
     if (desc) line += `. ${desc}`;
     addText(`${line}.`, `event:${i}`);
   });
@@ -1867,8 +1866,10 @@ function resolveVoiceCommandIdleStatus() {
     );
   }
   if (state.reviewPlayback.active) return REVIEW_PLAYBACK_STATUS;
-  if (hasUitgewerktResult()) return voiceCommandWake?.getStatusMessage() || getVoiceCommandWakePromptMessage();
-  return "";
+  // Ook zonder uitgewerkt verslag geeft de wake-listener nu status (luistert overal, zie
+  // canUseVoiceCommandWakeListen). De tekst is pas zichtbaar zodra review-section getoond
+  // wordt; feedback op het startscherm zelf loopt via showFeedback() in de standalone-flow.
+  return voiceCommandWake?.getStatusMessage() || getVoiceCommandWakePromptMessage();
 }
 
 function clearVoiceCommandProcessingStatusIfStale() {
@@ -1930,6 +1931,24 @@ function updateReviewStatus(message) {
   if (!reviewStatus) return;
   reviewStatus.textContent = message;
   reviewStatus.hidden = !message;
+}
+
+/**
+ * Zichtbaar statusregeltje bovenaan het startscherm voor de wake-listener ("Ok Minnie").
+ * #review-status (updateReviewStatus hierboven) zit in #review-section, dat verborgen is
+ * zolang er nog geen verslag is — dus zonder dit element krijg je op het kale startscherm
+ * geen enkele feedback dat er nog verbonden wordt na een refresh.
+ * @param {string} message
+ */
+function updateWakeStatus(message) {
+  if (!wakeStatus) return;
+  if (hasUitgewerktResult()) {
+    // Zodra er een verslag is, neemt #review-status het over.
+    wakeStatus.hidden = true;
+    return;
+  }
+  wakeStatus.textContent = message;
+  wakeStatus.hidden = !message;
 }
 
 function updateVoiceCommandPttUi() {
@@ -2002,7 +2021,11 @@ function ensureVoiceCommandWakeController() {
  * @param {"partial"|"final"|"speech_stopped"} source
  */
 function dispatchVoiceStt(text, source) {
-  if (!hasUitgewerktResult() || !realtimeInterviewEnabled) {
+  // Geen hasUitgewerktResult()-check meer: "Ok Minnie"/"Ok MegaMinnie" moeten ook op het
+  // startscherm herkend worden (zie canUseVoiceCommandWakeListen). Wat er daarna gebeurt met
+  // het gesproken commando (correctie blokkeren, taak/agenda los aanmaken) wordt afgehandeld
+  // in runVoiceCommandPlanOnce, niet hier.
+  if (!realtimeInterviewEnabled) {
     return { handled: false };
   }
   const ctrl = ensureVoiceCommandWakeController();
@@ -2011,6 +2034,9 @@ function dispatchVoiceStt(text, source) {
     source,
     playbackActive: state.reviewPlayback.active,
     blocked: reviewInlineCorrection.active || reviewInlineCorrection.finalizeInFlight,
+    // Laatst voorgelezen chunk als echo-referentie: een late STT-transcriptie van de eigen
+    // TTS-stem (voorlezen of bevestiging) mag in de luister-modus niet als commando gelden.
+    echoText: state.reviewPlayback.lastSpokenChunk || "",
   });
 }
 
@@ -2106,6 +2132,17 @@ async function runVoiceCommandPlanOnce(text) {
 
   if (plan.autoStartPlayback && plan.requiresPlayback) {
     if (isInlineCaptureVoiceCommand(plan.action)) {
+      if (!hasUitgewerktResult()) {
+        // Geen verslag (bijv. startscherm): Correctie heeft niets om te corrigeren, maar
+        // taak/agenda kunnen los aangemaakt worden via de standalone-flow.
+        if (plan.action === "correctie") {
+          showFeedback("Er is nog geen verslag om te corrigeren.", "info");
+          return;
+        }
+        if (!(await ensureStandaloneCaptureShell())) return;
+        applyReviewVoiceCommandFromPlan(text, plan);
+        return;
+      }
       if (!(await ensureReviewPlaybackShellForCapture())) return;
       applyReviewVoiceCommandFromPlan(text, plan);
       return;
@@ -2193,6 +2230,12 @@ async function ensureReviewPlaybackShellForCapture() {
     suppressLoopCleanup: false,
     ttsActive: false,
     lastSpokenChunk: plan.chunks[0] ?? "",
+    // Deze sessie is alleen opgezet om een taak/agenda/correctie via spraak te dicteren
+    // terwijl er nog geen voorlezen liep (bijv. "Ok Minnie, maak een agenda aan" buiten
+    // voorlezen om) — er is dus nooit echt audio gestart. finalizeInlineCorrectionAndResume
+    // gebruikt deze vlag om na afloop de sessie gewoon af te sluiten in plaats van (opnieuw)
+    // voorlezen te starten, wat zonder deze vlag per ongeluk gebeurde.
+    captureOnly: true,
   };
   ensureVoiceCommandWakeController().dispatch({ type: "PLAYBACK_STARTED" });
   updateReviewUi();
@@ -2201,6 +2244,46 @@ async function ensureReviewPlaybackShellForCapture() {
       await startReviewInlineListen();
     } catch {
       showFeedback("Spraakherkenning voor correctie kon niet starten.", "error");
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Losse taak/agenda-item dicteren ZONDER dat er al een uitgewerkt verslag is (bijv. "Ok
+ * Minnie, maak een taak aan" op het startscherm). Geen verslagtekst om chunks/voorlezen uit
+ * op te bouwen — dit is puur een luistersessie. `standalone: true` zorgt dat het commit-pad
+ * (applyInlineCaptureToReport) de nieuwe /api/visit-report/standalone-route gebruikt in
+ * plaats van de bestaand-verslag-uitbreidroute.
+ * @returns {Promise<boolean>}
+ */
+async function ensureStandaloneCaptureShell() {
+  if (state.reviewPlayback.active) return true;
+  cancelVoiceCommandWakeListenRetry();
+  if (isRealtimeConversationRunning()) stopRealtimeInterview("");
+  beginReviewPlaybackSession();
+  state.reviewPlayback = {
+    active: true,
+    paused: true,
+    cancelled: false,
+    chunks: [],
+    chunkParagraphKeys: [],
+    index: 0,
+    suspendForCorrection: null,
+    suppressLoopCleanup: false,
+    ttsActive: false,
+    lastSpokenChunk: "",
+    captureOnly: true,
+    standalone: true,
+  };
+  ensureVoiceCommandWakeController().dispatch({ type: "PLAYBACK_STARTED" });
+  showFeedback("Spreek de taak of het agenda-item in…", "info");
+  if (REVIEW_INLINE_LISTEN_ENABLED && realtimeInterviewEnabled && !isReviewInlineListening()) {
+    try {
+      await startReviewInlineListen();
+    } catch {
+      showFeedback("Spraakherkenning kon niet starten.", "error");
       return false;
     }
   }
@@ -2242,10 +2325,12 @@ function applyReviewVoiceCommandFromPlan(text, plan = null) {
 }
 
 function canUseVoiceCommandWakeListen() {
+  // Geen hasUitgewerktResult()-check meer: de wake-listener moet ook op het startscherm
+  // draaien, zodat "Ok Minnie"/"Ok MegaMinnie" daar ook een losse taak/agenda-item kunnen
+  // starten (zie ensureStandaloneCaptureShell).
   return (
     VOICE_COMMAND_WAKE_LISTEN_ENABLED &&
     REVIEW_INLINE_LISTEN_ENABLED &&
-    hasUitgewerktResult() &&
     realtimeInterviewEnabled &&
     !isRealtimeConversationRunning() &&
     !isSupplementVoiceListening() &&
@@ -2261,7 +2346,6 @@ function shouldScheduleVoiceCommandWakeListenRetry() {
   return (
     VOICE_COMMAND_WAKE_LISTEN_ENABLED &&
     REVIEW_INLINE_LISTEN_ENABLED &&
-    hasUitgewerktResult() &&
     realtimeInterviewEnabled &&
     !isRealtimeConversationRunning() &&
     !isSupplementVoiceListening() &&
@@ -2292,10 +2376,11 @@ async function waitForReviewInlineListenReady() {
 }
 
 async function ensureVoiceCommandWakeListen() {
+  // Geen hasUitgewerktResult()-check meer: luistert ook op het startscherm (zie
+  // canUseVoiceCommandWakeListen hierboven).
   if (
     !VOICE_COMMAND_WAKE_LISTEN_ENABLED ||
     !REVIEW_INLINE_LISTEN_ENABLED ||
-    !hasUitgewerktResult() ||
     !realtimeInterviewEnabled ||
     isRealtimeConversationRunning() ||
     isSupplementVoiceListening() ||
@@ -2313,30 +2398,36 @@ async function ensureVoiceCommandWakeListen() {
   if (!isReviewInlineListening()) {
     ctrl.dispatch({ type: "LISTEN_CONNECTING" });
     updateReviewStatus("Spraakcommando's verbinden…");
+    updateWakeStatus("Spraakcommando's verbinden…");
     try {
       const started = await startReviewInlineListen();
       if (started === false) {
         updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+        updateWakeStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
         return false;
       }
     } catch {
       updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+      updateWakeStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
       return false;
     }
   } else if (!ctrl.isListenReady()) {
     ctrl.dispatch({ type: "LISTEN_CONNECTING" });
     updateReviewStatus("Spraakcommando's verbinden…");
+    updateWakeStatus("Spraakcommando's verbinden…");
   }
 
   const ready = await waitForReviewInlineListenReady();
   if (!ready) {
     updateReviewStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
+    updateWakeStatus('Tik op "Spreek commando" om Ok MegaMinnie te activeren.');
     return false;
   }
 
   ctrl.dispatch({ type: "LISTEN_READY" });
   reviewInlineListenController?.setMicEnabled(true);
   void prefetchOpenAiSpeech(getVoiceCommandWakeAckSpeechText());
+  updateWakeStatus("Luisteren — zeg ‘Ok Minnie’ of ‘Ok MegaMinnie’.");
   return true;
 }
 
@@ -2369,7 +2460,10 @@ function stopVoiceCommandWakeListen({ clearStatus = true } = {}) {
   if (!isReviewInlineListening()) return;
   voiceCommandWake?.dispatch({ type: "LISTEN_LOST" });
   reviewInlineListenController?.stop("");
-  if (clearStatus) updateReviewStatus("");
+  if (clearStatus) {
+    updateReviewStatus("");
+    updateWakeStatus("");
+  }
 }
 
 /** Herstelt wake-luisteren na inline correctie (PTT/ack/mic kunnen blijven hangen). */
@@ -2587,12 +2681,35 @@ function applyReportFieldsFromResult(result) {
 }
 
 async function applyInlineCaptureToReport(supplementText, supplementSource) {
+  if (!supplementText.trim()) return null;
+
+  if (state.reviewPlayback.standalone && !hasUitgewerktResult()) {
+    // Losse taak/agenda-item vanaf het startscherm — geen bestaand verslag om uit te breiden.
+    // supplementSource is hier altijd "task" of "event" (Correctie wordt al eerder geweerd
+    // in runVoiceCommandPlanOnce zolang er geen verslag is).
+    const kind = supplementSource === "event" ? "event" : "task";
+    const result = await apiPostWithTimeout("/api/visit-report/standalone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: supplementText.trim(), kind }),
+    });
+    state.lastResult = result;
+    renderResult(result);
+    showFeedback(
+      kind === "task" ? "Taak aangemaakt." : "Agenda-item aangemaakt.",
+      "success",
+    );
+    // Eventuele vervolgsegmenten in dezelfde dicteersessie ("en zet ook nog...") lopen
+    // voortaan via de normale extend-route, want er bestaat nu een verslag/resultaat.
+    state.reviewPlayback.standalone = false;
+    return result;
+  }
+
   const existing = getExistingMegaMinnieFromUi();
   if (!existing) {
     showFeedback("Notitietitel en -tekst mogen niet leeg zijn.", "error");
     return null;
   }
-  if (!supplementText.trim()) return null;
 
   const fd = formFields();
   fd.append("existing", JSON.stringify(existing));
@@ -3137,6 +3254,17 @@ async function finalizeInlineCorrectionAndResume() {
     reviewInlineCorrection.pendingInterrupt = false;
     reviewInlineCorrection.enteredViaCommand = false;
     updateVoiceCorrectUi();
+
+    // Puur-dicteer-sessie (zie ensureReviewPlaybackShellForCapture): er is nooit echt
+    // voorgelezen, dus na het dicteren/aanmaken gewoon de sessie afsluiten in plaats van
+    // (opnieuw) voorlezen te starten.
+    if (state.reviewPlayback.captureOnly) {
+      state.reviewPlayback.suspendForCorrection = null;
+      restoreVoiceCommandListenAfterCorrection();
+      finishReviewPlaybackSession(reviewPlaybackSessionId, { skipInlineListenStop: true });
+      scheduleEnsureVoiceCommandWakeListen(0);
+      return;
+    }
 
     if (!state.reviewPlayback.suspendForCorrection) {
       restoreVoiceCommandListenAfterCorrection();
@@ -4715,13 +4843,18 @@ function updateOutputVisibility() {
   if (!show) {
     $("result-area").hidden = true;
     if (reviewSection) reviewSection.hidden = true;
-    stopReviewPlayback();
-    stopVoiceCommandWakeListen();
+    // Let op: stopReviewPlayback() hier NIET aanroepen als er een lopende standalone
+    // dicteersessie is (zie ensureStandaloneCaptureShell) — die is bewust actief terwijl
+    // hasUitgewerktResult() nog false is.
+    if (!state.reviewPlayback.standalone) stopReviewPlayback();
   } else {
     $("result-area").hidden = false;
     updateReviewUi();
-    void scheduleEnsureVoiceCommandWakeListen(0);
+    updateWakeStatus(""); // #review-status neemt het over zodra er een verslag is.
   }
+  // Wake-listener draait nu overal, ook op het startscherm (geen stopVoiceCommandWakeListen()
+  // meer bij ontbrekend verslag) — zie canUseVoiceCommandWakeListen/ensureVoiceCommandWakeListen.
+  void scheduleEnsureVoiceCommandWakeListen(0);
   updateSupplementUi();
 }
 
@@ -7209,6 +7342,14 @@ reviewInlineListenController = createRealtimeInterviewController({
     if (state.reviewPlayback.active) handleReviewInlineUserTurn(turn.text);
   },
   onSpeechStopped: (ctx) => {
+    // Altijd als eerste het gedempte volume herstellen, ongeacht welke tak hieronder het
+    // commando afhandelt — anders bleef het volume soms gedempt staan (zie
+    // handleReviewInlineSpeechStopped, die dit alleen deed als er verder geen commando
+    // via handleVoiceCommandStt werd herkend en afgehandeld).
+    if (reviewInlineCorrection.duckedForSpeech) {
+      reviewInlineCorrection.duckedForSpeech = false;
+      reviewSpeechPlayer?.setDucked(false);
+    }
     if (voiceCommandPttActive) {
       handleVoiceCommandPttSpeechStopped(ctx);
       return;

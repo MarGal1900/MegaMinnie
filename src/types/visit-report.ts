@@ -42,7 +42,6 @@ export const MegaMinnieOutputSchema = z.object({
             (v) => !Number.isNaN(Date.parse(v)),
             "endDateTime moet een geldige ISO-datum/tijd zijn",
           ),
-        location: z.string().optional(),
       }),
     )
     .default([]),

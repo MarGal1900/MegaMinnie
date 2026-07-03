@@ -45,7 +45,9 @@ describe("reduceVoiceCommandWake STT", () => {
     expect(result.state.phase).toBe("wake_ack");
     expect(result.state.ackInProgress).toBe(true);
     expect(result.effects.some((e) => e.type === "PLAY_WAKE_ACK")).toBe(true);
-    expect(result.effects.some((e) => e.type === "SET_MIC" && e.enabled === false)).toBe(true);
+    expect(result.effects.some((e) => e.type === "SET_MIC" && e.enabled === false)).toBe(
+      false,
+    );
   });
 
   it("zet dedupe pas na geslaagde ack", () => {
