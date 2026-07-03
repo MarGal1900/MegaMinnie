@@ -100,6 +100,20 @@ describe("buildRealtimeSessionPayload", () => {
       language: "nl",
     });
   });
+
+  it("zet create_response uit voor capture-sessies", () => {
+    const payload = buildRealtimeSessionPayload({
+      model: "gpt-realtime-mini",
+      voice: "verse",
+      instructions: "test",
+      transcriptionModel: "gpt-4o-mini-transcribe",
+      createResponse: false,
+    });
+    expect(payload.session.audio.input.turn_detection).toEqual({
+      type: "server_vad",
+      create_response: false,
+    });
+  });
 });
 
 describe("validateRealtimeSessionPrereqs", () => {

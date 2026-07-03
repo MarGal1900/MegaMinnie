@@ -1,17 +1,34 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
+  MEGA_MINNIE_SPEECH_PLAYBACK_RATE,
   REALTIME_QA_OPENING_PLAYBACK_RATE,
   TTS_PLAYBACK_RATE,
+  prefetchOpenAiSpeech,
 } from "../public/js/openai-speech.js";
 
+vi.mock("../public/js/api.js", () => ({
+  apiPostBlob: vi.fn(),
+}));
+
+import { apiPostBlob } from "../public/js/api.js";
+
 describe("TTS playback rate", () => {
-  it("is iets sneller dan normaal voor voorlezen", () => {
-    expect(TTS_PLAYBACK_RATE).toBeGreaterThan(1);
-    expect(TTS_PLAYBACK_RATE).toBeLessThanOrEqual(1.25);
+  it("gebruikt overal hetzelfde tempo als de Realtime-wijzigingsdialoog", () => {
+    expect(MEGA_MINNIE_SPEECH_PLAYBACK_RATE).toBe(1.0);
+    expect(TTS_PLAYBACK_RATE).toBe(MEGA_MINNIE_SPEECH_PLAYBACK_RATE);
+    expect(REALTIME_QA_OPENING_PLAYBACK_RATE).toBe(MEGA_MINNIE_SPEECH_PLAYBACK_RATE);
+  });
+});
+
+describe("prefetchOpenAiSpeech", () => {
+  beforeEach(() => {
+    vi.mocked(apiPostBlob).mockReset();
+    vi.mocked(apiPostBlob).mockResolvedValue(new Blob(["audio"]));
   });
 
-  it("gebruikt normale snelheid voor Vraag & Antwoord opening", () => {
-    expect(REALTIME_QA_OPENING_PLAYBACK_RATE).toBe(1.0);
-    expect(REALTIME_QA_OPENING_PLAYBACK_RATE).toBeLessThan(TTS_PLAYBACK_RATE);
+  it("stuurt de echte tekst naar de API, niet de cache-sleutel", async () => {
+    const text = "De uitwerking van het verslag is klaar. Zal ik het voorlezen?";
+    await prefetchOpenAiSpeech(text);
+    expect(apiPostBlob).toHaveBeenCalledWith("/api/realtime/speech", { text });
   });
 });

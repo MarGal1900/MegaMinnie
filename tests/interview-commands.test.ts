@@ -10,9 +10,23 @@ import {
   isRealtimeQaStopCommand,
   parseAnswerTranscript,
   parseOkMegaMinnieWakeCommand,
+  isOkMinnieWakeOnlyUtterance,
+  isPureReviewCorrectieRestartCommand,
+  containsCaptureDialogueClosingQuestion,
+  isCaptureDialogueAffirmative,
+  isAffirmativeSpeechAnswer,
+  isTopAffirmativeAnswer,
+  isExplicitContinueVoorlezenCommand,
+  isVoorlezenOfferDecline,
+  shouldAcceptVoorlezenOffer,
+  UITWERKING_KLAAR_VOORLEZEN_PROMPT,
   normalizeWakeCommandText,
   stripOkMegaMinnieWakePrefix,
   stripReviewVoiceCommand,
+  resolvePlaybackVoiceCommand,
+  shouldRejectPlaybackUtteranceAsTtsEcho,
+  containsReviewMaakAgendaCommand,
+  stripAssistantEchoFromUserSpeech,
 } from "../public/js/interview-commands.js";
 
 describe("isNextQuestionCommand", () => {
@@ -135,6 +149,30 @@ describe("review playback voice commands", () => {
     );
   });
 
+  it("resolvePlaybackVoiceCommand vindt agenda midden in TTS-echo", () => {
+    expect(
+      resolvePlaybackVoiceCommand(
+        "de klant wil volgende week ok minnie maak een agenda aan afspraak dinsdag",
+      ),
+    ).toMatchObject({
+      cmd: "maak_agenda",
+      effectiveText: "maak een agenda aan afspraak dinsdag",
+    });
+    expect(
+      resolvePlaybackVoiceCommand("vervolgafspraak inplannen ok minnie maak een agenda aan"),
+    ).toMatchObject({
+      cmd: "maak_agenda",
+      effectiveText: "maak een agenda aan",
+    });
+  });
+
+  it("shouldRejectPlaybackUtteranceAsTtsEcho laat agenda door bij echo-voorvoegsel", () => {
+    const chunk = "De klant wil graag volgende week een vervolgafspraak inplannen.";
+    const utterance = `${chunk} ok minnie maak een agenda aan`;
+    expect(shouldRejectPlaybackUtteranceAsTtsEcho(utterance, "maak_agenda", chunk)).toBe(false);
+    expect(containsReviewMaakAgendaCommand(utterance)).toBe(true);
+  });
+
   it("herkent natuurlijke voorlees-commando's", () => {
     expect(detectReviewVoiceCommand("Lees voor")).toBe("voorlezen");
     expect(detectReviewVoiceCommand("Lees het verslag voor")).toBe("voorlezen");
@@ -201,6 +239,15 @@ describe("review playback voice commands", () => {
     expect(stripReviewVoiceCommand("Correctie. het bedrag is vijfhonderd euro")).toBe(
       "het bedrag is vijfhonderd euro",
     );
+  });
+
+  // Regressietest: puur "Correctie" (zonder inhoud) mag opnieuw starten als correctie al actief is.
+  it("isPureReviewCorrectieRestartCommand herkent herhaalde correctie zonder inhoud", () => {
+    expect(isPureReviewCorrectieRestartCommand("Correctie")).toBe(true);
+    expect(isPureReviewCorrectieRestartCommand("Ok Minnie")).toBe(true);
+    expect(isPureReviewCorrectieRestartCommand("Ok Minnie, correctie")).toBe(true);
+    expect(isPureReviewCorrectieRestartCommand("Correctie de naam is Jan")).toBe(false);
+    expect(isPureReviewCorrectieRestartCommand("de correctie staat in alinea twee")).toBe(false);
   });
 
   // Regressietest: correctie zonder extra tekst → detectReviewVoiceCommand returnt "correctie",
@@ -370,6 +417,138 @@ describe("Ok MegaMinnie wake phrase", () => {
   });
 });
 
+describe("isOkMinnieWakeOnlyUtterance", () => {
+  it("herkent schone wake-only varianten", () => {
+    expect(isOkMinnieWakeOnlyUtterance("Ok Minnie")).toBe(true);
+    expect(isOkMinnieWakeOnlyUtterance("Ok MegaMinnie")).toBe(true);
+  });
+
+  it("herkent wake-only midden in TTS-echo", () => {
+    expect(isOkMinnieWakeOnlyUtterance("vervolgafspraak inplannen ok minnie")).toBe(true);
+  });
+
+  it("herkent geen wake met commando erna", () => {
+    expect(isOkMinnieWakeOnlyUtterance("Ok Minnie, maak een taak aan")).toBe(false);
+    expect(isOkMinnieWakeOnlyUtterance("vervolgafspraak ok minnie maak agenda aan")).toBe(false);
+  });
+});
+
+describe("capture dialogue afsluiting", () => {
+  it("herkent Mini's afsluitvraag", () => {
+    expect(
+      containsCaptureDialogueClosingQuestion("Ben je klaar? Zal ik verder gaan met voorlezen?"),
+    ).toBe(true);
+  });
+
+  it("herkent bevestiging en expliciet verder-voorlezen", () => {
+    expect(isCaptureDialogueAffirmative("Ja graag")).toBe(true);
+    expect(isExplicitContinueVoorlezenCommand("ga verder met voorlezen")).toBe(true);
+    expect(isExplicitContinueVoorlezenCommand("voorlezen")).toBe(true);
+  });
+});
+
+describe("voorlezen-aanbod na uitwerking", () => {
+  it("kent standaard prompt en acceptatie/afwijzing", () => {
+    expect(UITWERKING_KLAAR_VOORLEZEN_PROMPT).toContain("Zal ik het voorlezen");
+    expect(shouldAcceptVoorlezenOffer("ja")).toBe(true);
+    expect(shouldAcceptVoorlezenOffer("ja hoor")).toBe(true);
+    expect(shouldAcceptVoorlezenOffer("lees het verslag voor")).toBe(true);
+    expect(isVoorlezenOfferDecline("nee dank je")).toBe(true);
+    expect(isVoorlezenOfferDecline("ja graag")).toBe(false);
+    expect(isAffirmativeSpeechAnswer("zeker niet")).toBe(false);
+  });
+
+  it("herkent uitgebreide ja-varianten uit de gebruikerslijst", () => {
+    const affirmatives = [
+      "Uiteraard",
+      "Absoluut",
+      "Akkoord",
+      "Zeker",
+      "Inderdaad",
+      "Vanzelfsprekend",
+      "Dat klopt",
+      "Precies",
+      "Correct",
+      "Geen probleem",
+      "Goedgekeurd",
+      "Dat is afgesproken",
+      "Wordt geregeld",
+      "Dat staat vast",
+      "Present",
+      "Graag!",
+      "Super!",
+      "Top!",
+      "Heel graag!",
+      "Honderd procent",
+      "Zonder twijfel",
+      "Zeker weten!",
+      "Natuurlijk!",
+      "En óf!",
+      "Direct!",
+      "Volmondig",
+      "Dat spreekt voor zich!",
+      "Reken maar!",
+      "Prima",
+      "Is goed",
+      "Oké",
+      "Check",
+      "Jup",
+      "Yes",
+      "Tuurlijk",
+      "Yep",
+      "Zekers",
+      "Goed plan",
+      "Doen we",
+      "Komt voor elkaar",
+      "Present!",
+      "Welzeker",
+      "Driewerf ja",
+      "Zoiets",
+      "IJzersterk plan",
+      "Amen daarop",
+      "Dat kun je wel zeggen",
+      "Ongetwijfeld",
+      "Positief",
+      "Gewoon doen",
+    ];
+    for (const phrase of affirmatives) {
+      expect(isAffirmativeSpeechAnswer(phrase), `verwacht ja: ${phrase}`).toBe(true);
+      expect(shouldAcceptVoorlezenOffer(phrase), `voorlezen-aanbod: ${phrase}`).toBe(true);
+    }
+  });
+
+  it("herkent alle gangbare top-varianten als ja", () => {
+    const topAffirmatives = [
+      "Top",
+      "Ok top",
+      "Oké top",
+      "Ja top",
+      "Super top",
+      "Echt top",
+      "Heel top",
+      "Helemaal top",
+      "Dat is top",
+      "Dat is echt top",
+      "Dat is super top",
+      "Top hoor",
+      "Top zo",
+      "Top man",
+      "Gewoon top",
+      "Wat top",
+      "Is top",
+      "Prima top",
+      "Natuurlijk top",
+    ];
+    for (const phrase of topAffirmatives) {
+      expect(isAffirmativeSpeechAnswer(phrase), phrase).toBe(true);
+      expect(shouldAcceptVoorlezenOffer(phrase), phrase).toBe(true);
+    }
+    expect(isAffirmativeSpeechAnswer("van top tot teen")).toBe(false);
+    expect(isAffirmativeSpeechAnswer("niet top")).toBe(false);
+    expect(isAffirmativeSpeechAnswer("top tien")).toBe(false);
+  });
+});
+
 describe("parseAnswerTranscript", () => {
   it("strippt command-only transcript voor volgende vraag", () => {
     const { cleaned, advanceNext } = parseAnswerTranscript("Volgende vraag.");
@@ -389,5 +568,27 @@ describe("parseAnswerTranscript", () => {
     const { cleaned, advanceNext } = parseAnswerTranscript(text);
     expect(advanceNext).toBe(true);
     expect(cleaned).toBe("Het schadeportaal");
+  });
+});
+
+describe("stripAssistantEchoFromUserSpeech (Realtime-dialoog)", () => {
+  const agendaQuestion =
+    "Wanneer wil je de afspraak plannen en met wie moet ik hem inplannen?";
+
+  it("verwijdert pure assistent-echo uit STT", () => {
+    expect(stripAssistantEchoFromUserSpeech(agendaQuestion, [agendaQuestion])).toBe("");
+  });
+
+  it("behoudt gebruikersantwoord na echo-voorvoegsel", () => {
+    const userAnswer = "dinsdag om 14 uur met Jan";
+    expect(
+      stripAssistantEchoFromUserSpeech(`${agendaQuestion} ${userAnswer}`, [agendaQuestion]),
+    ).toBe(userAnswer);
+  });
+
+  it("filtert echo van de laatste assistent-vraag uit een gemengde beurt", () => {
+    const followUp = "Op welke datum?";
+    const user = "volgende week woensdag";
+    expect(stripAssistantEchoFromUserSpeech(`${followUp} ${user}`, [followUp])).toBe(user);
   });
 });

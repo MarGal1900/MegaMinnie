@@ -208,6 +208,22 @@ export function containsReviewCorrectieCommand(text) {
 }
 
 /**
+ * Puur "Correctie" / "Ok Minnie" (zonder dictee-inhoud) — herhalen start opnieuw de
+ * correctiedialoog, zelfde gedrag als de eerste keer.
+ * @param {string} text
+ */
+export function isPureReviewCorrectieRestartCommand(text) {
+  if (isOkMinnieWakeOnlyUtterance(text)) return true;
+  const wake = parseOkMegaMinnieWakeCommand(text);
+  const effective = wake.wakeDetected ? wake.commandText : text;
+  if (isReviewCorrectieCommand(effective)) return true;
+  if (containsReviewCorrectieCommand(effective)) {
+    return !stripReviewVoiceCommand(effective).replace(/\s+/g, " ").trim();
+  }
+  return false;
+}
+
+/**
  * Normaliseert tekst voor TTS-echo-vergelijking (los van commando-normalisatie,
  * bewust geen Cyrillisch-transliteratie hier — dit is puur woord-overlap).
  * @param {string} text
@@ -273,6 +289,43 @@ export function stripLeadingSpeechEcho(candidateText, lastSpokenChunk) {
   }
   if (i === 0) return original;
   return rawWords.slice(i).join(" ").trim();
+}
+
+/**
+ * Verwijdert assistent-echo uit gebruikersspraak (microfoon pikt Mini's stem via de speaker).
+ * Gebruik in Realtime-dialoog (correctie/taak/agenda) en overal waar duplex-echo optreedt.
+ * @param {string} userText
+ * @param {string[]} assistantSources
+ */
+export function stripAssistantEchoFromUserSpeech(userText, assistantSources = []) {
+  let cleaned = String(userText || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+
+  for (const source of assistantSources) {
+    const spoken = String(source || "").replace(/\s+/g, " ").trim();
+    if (!spoken) continue;
+
+    if (!isLikelyReviewSpeechEcho(cleaned, spoken)) {
+      const stripped = stripLeadingSpeechEcho(cleaned, spoken);
+      if (stripped !== cleaned) {
+        cleaned = stripped.replace(/\s+/g, " ").trim();
+      }
+      continue;
+    }
+
+    const remainder = stripLeadingSpeechEcho(cleaned, spoken);
+    if (remainder !== cleaned) {
+      cleaned = remainder.replace(/\s+/g, " ").trim();
+      if (!cleaned) return "";
+      continue;
+    }
+
+    if (normalizeReviewSpeechEchoText(cleaned) === normalizeReviewSpeechEchoText(spoken)) {
+      return "";
+    }
+  }
+
+  return cleaned;
 }
 
 /** @param {string} text */
@@ -464,6 +517,242 @@ export function extractOkMegaMinnieWakeAnywhere(text) {
   };
 }
 
+/**
+ * Puur "Ok Minnie" / "Ok MegaMinnie" (zonder commando erna), ook midden in een uiting
+ * (TTS-echo ervoor). Zelfde detectiebreedte als containsReviewCorrectieCommand voor
+ * "Correctie" tijdens voorlezen.
+ * @param {string} text
+ */
+export function isOkMinnieWakeOnlyUtterance(text) {
+  if (isOkMegaMinnieWakeOnly(text)) return true;
+  if (!containsOkMegaMinnieWake(text)) return false;
+  return extractOkMegaMinnieWakeAnywhere(text).wakeOnly;
+}
+
+/** Korte stijl voor correctie/taak/agenda tijdens voorlezen (niet Vraag & Antwoord). */
+export const CAPTURE_DIALOGUE_BRIEF_STYLE =
+  "Dit is een korte onderbreking tijdens voorlezen — geen interview. " +
+  "Maximaal één verduidelijkingsvraag alleen als iets echt onduidelijk is. " +
+  "Herhaal of parafraseer niet wat de gebruiker al zei. Geen smalltalk. " +
+  "Elk antwoord: maximaal één korte zin.";
+
+/** Gedeelde afsluit-instructie voor Realtime-dialoog tijdens voorlezen. */
+export const CAPTURE_DIALOGUE_CLOSING_INSTRUCTION =
+  "Als de gebruiker klaar is, alles gegeven heeft, of 'klaar' of 'ja' zegt: " +
+  "vraag exact één keer: 'Ben je klaar? Zal ik verder gaan met voorlezen?' " +
+  "Na bevestiging: één kort woord (bijv. 'Prima') en stop met vragen stellen.";
+
+/** Mini vraagt na uitwerking of ze het verslag mag voorlezen. */
+export const UITWERKING_KLAAR_VOORLEZEN_PROMPT =
+  "De uitwerking van het verslag is klaar. Zal ik het voorlezen?";
+
+export const VOORLEZEN_OFFER_AWAIT_STATUS =
+  'Zeg "ja" om voor te laten lezen, of "nee" om over te slaan.';
+
+/** @param {string} text */
+export function containsCaptureDialogueClosingQuestion(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /ben je klaar/.test(normalized) && /voorlezen/.test(normalized);
+}
+
+/** @param {string} text */
+export function isExplicitContinueVoorlezenCommand(text) {
+  if (isStartVoorlezenCommand(text) || isReviewVoorlezenCommand(text)) return true;
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return (
+    /\b(ga|doorgaan|verder)\b.*\b(voorlezen|lezen)\b/.test(normalized) ||
+    /\b(voorlezen|lees verder|lees door)\b/.test(normalized)
+  );
+}
+
+/**
+ * Zetten van korte spraakantwoorden die als "ja" / bevestiging tellen (voorlezen-aanbod,
+ * capture-dialoog, wake remainder). Na normalizeCommandText (kleine letters, geen leestekens).
+ * @type {ReadonlySet<string>}
+ */
+export const AFFIRMATIVE_SPEECH_ANSWERS = new Set([
+  // Klassiek
+  "ja",
+  "ja graag",
+  "ja hoor",
+  "jawel",
+  "jep",
+  "jup",
+  "yep",
+  "yes",
+  "ok",
+  "oke",
+  "okay",
+  "oké",
+  // Zakelijk & professioneel
+  "uiteraard",
+  "absoluut",
+  "akkoord",
+  "zeker",
+  "inderdaad",
+  "vanzelfsprekend",
+  "dat klopt",
+  "precies",
+  "correct",
+  "geen probleem",
+  "goedgekeurd",
+  "dat is afgesproken",
+  "wordt geregeld",
+  "dat staat vast",
+  "present",
+  // Enthousiast & positief
+  "graag",
+  "super",
+  "top",
+  "heel graag",
+  "honderd procent",
+  "100 procent",
+  "zonder twijfel",
+  "zeker weten",
+  "natuurlijk",
+  "en of",
+  "direct",
+  "volmondig",
+  "dat spreekt voor zich",
+  "reken maar",
+  // Informeel & alledaags
+  "prima",
+  "is goed",
+  "check",
+  "tuurlijk",
+  "zekers",
+  "goed plan",
+  "doen we",
+  "komt voor elkaar",
+  "klopt",
+  "doe maar",
+  "goed",
+  // Bevestigend / oudhollands
+  "welzeker",
+  "driewerf ja",
+  "zoiets",
+  "ijzersterk plan",
+  "amen daarop",
+  "dat kun je wel zeggen",
+  "ongetwijfeld",
+  "positief",
+  "gewoon doen",
+  // Top — expliciete varianten
+  "ok top",
+  "oke top",
+  "okay top",
+  "ja top",
+  "super top",
+  "echt top",
+  "heel top",
+  "helemaal top",
+  "erg top",
+  "gewoon top",
+  "wat top",
+  "is top",
+  "dat is top",
+  "dat is echt top",
+  "dat is heel top",
+  "dat is super top",
+  "dat is helemaal top",
+  "dat is erg top",
+  "dat is gewoon top",
+  "prima top",
+  "natuurlijk top",
+  "tuurlijk top",
+  "zeker top",
+  "goed top",
+  "top hoor",
+  "top zo",
+  "top man",
+  "top dat",
+  "top dus",
+  "top e",
+  "top top",
+]);
+
+/** @param {string} normalized reeds genormaliseerde tekst */
+function containsAffirmativeNegation(normalized) {
+  return /\b(niet|nee|geen zin|liever niet|no way|never|nope)\b/.test(normalized);
+}
+
+/**
+ * Korte uitingen met "top" als bevestiging (ok top, dat is top, top hoor, …).
+ * @param {string} normalized
+ */
+export function isTopAffirmativeAnswer(normalized) {
+  if (!normalized || !/\btop\b/.test(normalized)) return false;
+  if (containsAffirmativeNegation(normalized)) return false;
+  if (/\b(niet|geen)\s+top\b/.test(normalized)) return false;
+  if (/\btop\s+(van|tot|naar|ten|tien|100|honderd|drie|vijf)\b/.test(normalized)) return false;
+  if (/\bvan\s+top\b/.test(normalized)) return false;
+
+  if (normalized === "top") return true;
+  if (/^top(\s+(hoor|zo|man|dat|dus|e|top)){1,2}$/.test(normalized)) return true;
+  if (normalized.endsWith(" top") && normalized.split(/\s+/).length <= 5) return true;
+  return false;
+}
+
+/**
+ * Herken spraakantwoorden die als bevestiging ("ja") mogen gelden.
+ * @param {string} text
+ */
+export function isAffirmativeSpeechAnswer(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized || containsAffirmativeNegation(normalized)) return false;
+  if (AFFIRMATIVE_SPEECH_ANSWERS.has(normalized)) return true;
+  if (isTopAffirmativeAnswer(normalized)) return true;
+  // STT-varianten: "ja zeker", "zeker hoor", "natuurlijk hoor" …
+  if (/^ja(\s+\w+){0,3}$/.test(normalized)) return true;
+  const prefixMatch = normalized.match(
+    /^(uiteraard|absoluut|akkoord|zeker|natuurlijk|tuurlijk|graag|prima|jawel|jawel hoor|zeker hoor|natuurlijk hoor)(\s|$)/,
+  );
+  if (prefixMatch && normalized.split(/\s+/).length <= 4) return true;
+  return false;
+}
+
+/** @param {string} text */
+export function isCaptureDialogueAffirmative(text) {
+  return isAffirmativeSpeechAnswer(text);
+}
+
+/** @param {string} text */
+export function isCaptureDialogueDoneSignal(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /\b(klaar|dat was het|dat is alles|niets meer|verder geen|geen vragen meer)\b/.test(
+    normalized,
+  );
+}
+
+/** @param {string} text */
+export function isVoorlezenOfferDecline(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (
+    /^(nee|nee hoor|nee dank(?: je| u|jewel)?|nee bedankt|niet nu|later|laat maar|niet nodig|hoef niet|skip)[.!?,;:]*$/.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return /\b(niet voorlezen|laat maar zitten|hoeft niet|niet nodig)\b/.test(normalized);
+}
+
+/** @param {string} text */
+export function shouldAcceptVoorlezenOffer(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  if (isVoorlezenOfferDecline(normalized)) return false;
+  if (isAffirmativeSpeechAnswer(normalized)) return true;
+  return (
+    isExplicitContinueVoorlezenCommand(normalized) ||
+    detectReviewVoiceCommand(normalized) === "voorlezen"
+  );
+}
+
 /** @returns {"correctie"|"voorlezen"|"stop"|"maak_taak"|"maak_agenda"|null} */
 export function detectReviewVoiceCommand(text) {
   if (isStartVoorlezenCommand(text) || isReviewVoorlezenCommand(text)) return "voorlezen";
@@ -478,6 +767,90 @@ export function detectReviewVoiceCommand(text) {
   if (endsWithReviewCorrectieCommand(text)) return "correctie";
   if (isReviewStopCommand(text)) return "stop";
   return null;
+}
+
+/** @param {string} text */
+export function containsReviewMaakAgendaCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /\bmaak(?:\s+een)?\s+agenda(?:\s+aan)?\b/.test(normalized);
+}
+
+/** @param {string} text */
+export function containsReviewMaakTaakCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return /\bmaak(?:\s+een)?\s+taak(?:\s+aan)?\b/.test(normalized);
+}
+
+const INLINE_CAPTURE_ANYWHERE_RES = [
+  { cmd: "maak_agenda", re: /\bmaak(?:\s+een)?\s+agenda(?:\s+aan)?\b/i },
+  { cmd: "maak_taak", re: /\bmaak(?:\s+een)?\s+taak(?:\s+aan)?\b/i },
+  { cmd: "correctie", re: /\bcorrectie\b/i },
+];
+
+/**
+ * Vind taak/agenda/correctie midden in een uiting (TTS-echo of wake-woord ervoor).
+ * Alleen bedoeld tijdens voorlezen vóórdat er al dictee actief is.
+ * @param {string} text
+ * @returns {{ cmd: "maak_agenda"|"maak_taak"|"correctie"; effectiveText: string } | null}
+ */
+function findInlineCaptureCommandAnywhere(text) {
+  const original = String(text || "").trim();
+  if (!original) return null;
+  /** @type {{ cmd: "maak_agenda"|"maak_taak"|"correctie"; index: number } | null} */
+  let earliest = null;
+  for (const { cmd, re } of INLINE_CAPTURE_ANYWHERE_RES) {
+    const match = original.match(re);
+    if (match && match.index !== undefined) {
+      if (!earliest || match.index < earliest.index) {
+        earliest = { cmd, index: match.index };
+      }
+    }
+  }
+  if (!earliest) return null;
+  return { cmd: earliest.cmd, effectiveText: original.slice(earliest.index).trim() };
+}
+
+/**
+ * Herken commando's tijdens voorlezen, ook wanneer TTS-echo of wake-woord niet aan het
+ * begin staat (zelfde aanpak als containsReviewCorrectieCommand voor "Correctie").
+ * @param {string} text
+ * @returns {{ cmd: NonNullable<ReturnType<typeof detectReviewVoiceCommand>>; effectiveText: string } | null}
+ */
+export function resolvePlaybackVoiceCommand(text) {
+  const original = String(text || "").trim();
+  if (!original) return null;
+
+  const wake = parseOkMegaMinnieWakeCommand(original);
+  if (wake.wakeDetected && !wake.wakeOnly) {
+    const cmd = detectReviewVoiceCommand(wake.commandText);
+    if (cmd) return { cmd, effectiveText: wake.commandText };
+  }
+
+  const anywhereWake = extractOkMegaMinnieWakeAnywhere(original);
+  if (anywhereWake.wakeDetected && !anywhereWake.wakeOnly) {
+    const cmd = detectReviewVoiceCommand(anywhereWake.commandText);
+    if (cmd) return { cmd, effectiveText: anywhereWake.commandText };
+  }
+
+  const direct = detectReviewVoiceCommand(original);
+  if (direct) return { cmd: direct, effectiveText: original };
+
+  return findInlineCaptureCommandAnywhere(original);
+}
+
+/**
+ * @param {string} effectiveText
+ * @param {ReturnType<typeof detectReviewVoiceCommand>} cmd
+ * @param {string} lastSpokenChunk
+ */
+export function shouldRejectPlaybackUtteranceAsTtsEcho(effectiveText, cmd, lastSpokenChunk) {
+  if (!isLikelyReviewSpeechEcho(effectiveText, lastSpokenChunk)) return false;
+  if (cmd === "correctie" && containsReviewCorrectieCommand(effectiveText)) return false;
+  if (cmd === "maak_agenda" && containsReviewMaakAgendaCommand(effectiveText)) return false;
+  if (cmd === "maak_taak" && containsReviewMaakTaakCommand(effectiveText)) return false;
+  return true;
 }
 
 const REVIEW_VOICE_COMMAND_PREFIX_RE =

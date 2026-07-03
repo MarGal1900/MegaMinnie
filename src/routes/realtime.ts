@@ -7,6 +7,7 @@ import {
   validateSpeechPrereqs,
 } from "../lib/openai-speech.js";
 import {
+  getEventCaptureRealtimeInstructions,
   getListenRealtimeInstructions,
   getOpenAiApiKey,
   getRealtimeInstructions,
@@ -15,6 +16,7 @@ import {
   getRealtimeVoice,
   getReviewRealtimeInstructions,
   getSupplementRealtimeInstructions,
+  getTaskCaptureRealtimeInstructions,
   isRealtimeInterviewEnabled,
 } from "../lib/realtime-config.js";
 
@@ -32,6 +34,7 @@ type RealtimeSessionCreateOptions = {
   voice: string;
   instructions: string;
   transcriptionModel: string;
+  createResponse?: boolean;
   fetchImpl?: typeof fetch;
 };
 
@@ -41,7 +44,13 @@ export function buildRealtimeSessionPayload(params: {
   voice: string;
   instructions: string;
   transcriptionModel: string;
+  /** false = alleen transcriptie/VAD, geen automatische response.create (capture/review). */
+  createResponse?: boolean;
 }) {
+  const turnDetection: Record<string, unknown> = { type: "server_vad" };
+  if (params.createResponse === false) {
+    turnDetection.create_response = false;
+  }
   return {
     session: {
       type: "realtime",
@@ -49,9 +58,7 @@ export function buildRealtimeSessionPayload(params: {
       instructions: params.instructions,
       audio: {
         input: {
-          turn_detection: {
-            type: "server_vad",
-          },
+          turn_detection: turnDetection,
           transcription: {
             model: params.transcriptionModel,
             language: "nl",
@@ -157,7 +164,7 @@ function extractClientSecretPayload(body: unknown): {
 export async function createRealtimeSession(
   opts: RealtimeSessionCreateOptions,
 ): Promise<RealtimeSessionSuccess> {
-  const { apiKey, model, voice, instructions, transcriptionModel, fetchImpl = fetch } = opts;
+  const { apiKey, model, voice, instructions, transcriptionModel, createResponse, fetchImpl = fetch } = opts;
   if (!apiKey.trim()) {
     throw new Error("OPENAI_API_KEY ontbreekt voor Realtime sessies.");
   }
@@ -169,7 +176,13 @@ export async function createRealtimeSession(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(
-      buildRealtimeSessionPayload({ model, voice, instructions, transcriptionModel }),
+      buildRealtimeSessionPayload({
+        model,
+        voice,
+        instructions,
+        transcriptionModel,
+        createResponse,
+      }),
     ),
   });
 
@@ -196,6 +209,7 @@ async function handleRealtimeSession(
   res: import("express").Response,
   next: import("express").NextFunction,
   instructions: string,
+  opts: { createResponse?: boolean } = {},
 ) {
   try {
     const apiKey = getOpenAiApiKey();
@@ -214,6 +228,7 @@ async function handleRealtimeSession(
       voice: getRealtimeVoice(),
       instructions,
       transcriptionModel: getRealtimeTranscriptionModel(),
+      createResponse: opts.createResponse,
     });
 
     res.json({
@@ -233,7 +248,21 @@ realtimeRouter.post("/session", async (_req, res, next) => {
 });
 
 realtimeRouter.post("/session/supplement", async (_req, res, next) => {
-  await handleRealtimeSession(res, next, getSupplementRealtimeInstructions());
+  await handleRealtimeSession(res, next, getSupplementRealtimeInstructions(), {
+    createResponse: false,
+  });
+});
+
+realtimeRouter.post("/session/task-capture", async (_req, res, next) => {
+  await handleRealtimeSession(res, next, getTaskCaptureRealtimeInstructions(), {
+    createResponse: false,
+  });
+});
+
+realtimeRouter.post("/session/event-capture", async (_req, res, next) => {
+  await handleRealtimeSession(res, next, getEventCaptureRealtimeInstructions(), {
+    createResponse: false,
+  });
 });
 
 realtimeRouter.post("/session/listen", async (_req, res, next) => {

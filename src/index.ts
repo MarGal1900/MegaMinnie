@@ -18,6 +18,7 @@ import { getMailSignature } from "./lib/mail-config.js";
 import { getDefaultAccountManager } from "./lib/task-assignee-config.js";
 import { salesforceRouter } from "./routes/salesforce.js";
 import { realtimeRouter } from "./routes/realtime.js";
+import { shareReportRouter } from "./routes/share-report.js";
 import { visitReportRouter } from "./routes/visit-report.js";
 import { voiceRouter } from "./routes/voice.js";
 
@@ -99,6 +100,7 @@ app.get("/", (_req, res) => {
 
 app.use("/api", requireApiKey);
 app.use("/api/visit-report", visitReportRouter);
+app.use("/api/share-report", shareReportRouter);
 app.use("/api/salesforce", salesforceRouter);
 app.use("/api/realtime", realtimeRouter);
 app.use("/api/voice", voiceRouter);

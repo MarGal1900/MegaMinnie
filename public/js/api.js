@@ -11,6 +11,24 @@ function authHeaders(extra = {}) {
 }
 
 /** @param {string} path @param {RequestInit} [options] */
+export async function apiGetBlob(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: authHeaders(
+      options.headers instanceof Headers
+        ? Object.fromEntries(options.headers.entries())
+        : { ...(options.headers ?? {}) },
+    ),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Fout ${res.status}`);
+  }
+  return res.blob();
+}
+
+/** @param {string} path @param {RequestInit} [options] */
 export async function apiPost(path, options = {}) {
   const headers = authHeaders(
     options.headers instanceof Headers

@@ -5,3 +5,5 @@ dist/
 .DS_Store
 .vercel
 .env*
+Bezoekverslagen/*
+!Bezoekverslagen/.gitkeep

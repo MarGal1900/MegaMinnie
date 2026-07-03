@@ -15,18 +15,22 @@ export async function fetchOpenAiSpeechBlob(text) {
 /** @type {Map<string, { blob?: Blob; promise?: Promise<Blob> }>} */
 const speechBlobCache = new Map();
 
+/** Bump bij wijziging stem/snelheid/instructies server-side — anders blijft oude audio in cache. */
+const SPEECH_CACHE_VERSION = 3;
+
 /**
  * @param {string} text
  * @returns {Promise<Blob>}
  */
 export function prefetchOpenAiSpeech(text) {
-  const key = text.replace(/\s+/g, " ").trim();
-  if (!key) return Promise.reject(new Error("Lege tekst."));
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return Promise.reject(new Error("Lege tekst."));
+  const key = `${SPEECH_CACHE_VERSION}:${normalized}`;
   const cached = speechBlobCache.get(key);
   if (cached?.blob) return Promise.resolve(cached.blob);
   if (cached?.promise) return cached.promise;
 
-  const promise = fetchOpenAiSpeechBlob(key)
+  const promise = fetchOpenAiSpeechBlob(normalized)
     .then((blob) => {
       speechBlobCache.set(key, { blob });
       return blob;
@@ -60,7 +64,7 @@ export async function playOpenAiSpeechOnce(text, options = {}) {
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   audio.volume = 1;
-  audio.playbackRate = options.playbackRate ?? TTS_PLAYBACK_RATE;
+  audio.playbackRate = options.playbackRate ?? MEGA_MINNIE_SPEECH_PLAYBACK_RATE;
   try {
     await playAudioElement(audio);
   } finally {
@@ -88,10 +92,15 @@ const TTS_POST_GRACE_MS = 900;
  * "altijd volledig pauzeren" (risico op constant onderbroken voorlezen).
  */
 const TTS_DUCK_VOLUME = 0.12;
-/** Iets sneller voorlezen (1.0 = normaal). */
-export const TTS_PLAYBACK_RATE = 1.12;
-/** Vraag & Antwoord opening: normale snelheid, zelfde toon als Realtime-interview. */
-export const REALTIME_QA_OPENING_PLAYBACK_RATE = 1.0;
+/**
+ * Afspeelsnelheid voor alle OpenAI-TTS (voorlezen, wake-bevestiging, voorlezen-aanbod).
+ * 1.0 = zelfde natuurlijke tempo als de Realtime-wijzigingsdialoog (correctie/taak/agenda).
+ */
+export const MEGA_MINNIE_SPEECH_PLAYBACK_RATE = 1.0;
+/** @deprecated gebruik MEGA_MINNIE_SPEECH_PLAYBACK_RATE */
+export const TTS_PLAYBACK_RATE = MEGA_MINNIE_SPEECH_PLAYBACK_RATE;
+/** @deprecated gebruik MEGA_MINNIE_SPEECH_PLAYBACK_RATE */
+export const REALTIME_QA_OPENING_PLAYBACK_RATE = MEGA_MINNIE_SPEECH_PLAYBACK_RATE;
 
 /**
  * @param {HTMLAudioElement} audio
@@ -285,7 +294,7 @@ export function createOpenAiSpeechPlayback(options = {}) {
         }
         blobUrl = URL.createObjectURL(blob);
         audio = new Audio(blobUrl);
-        audio.playbackRate = TTS_PLAYBACK_RATE;
+        audio.playbackRate = MEGA_MINNIE_SPEECH_PLAYBACK_RATE;
         audio.volume = duckVolume;
         void playAudioElement(audio)
           .then(() => {

@@ -1,4 +1,5 @@
 import { buildGespreksverslagDocxBlob } from "./gespreksverslag-docx.bundle.js";
+import { apiGetBlob, apiPost } from "./api.js";
 
 /** @typedef {{ meetingSubject: string; reportBody: string; meetingDate?: Date | string; contactName?: string; recipientsInput?: string; mailSignature?: string }} ShareReportContext */
 /** @typedef {"desktop" | "mobile"} OutlookComposeTarget */
@@ -399,13 +400,20 @@ export function resolveReportDateTimeLabel(options) {
 }
 
 /**
- * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
- * @returns {Promise<{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget; filename: string; mailOpened: boolean; composeUrl: string } | { ok: false; error: string }>}
+ * @param {string} url
+ * @param {string} filename
  */
-export async function shareReportViaEmail(options) {
-  const prepared = prepareShareReportEmail(options);
-  if (!prepared.ok) return prepared;
+async function downloadServerAttachment(url, filename) {
+  const blob = await apiGetBlob(url);
+  downloadBlobAttachment(filename, blob);
+}
 
+/**
+ * Browser-fallback: DOCX downloaden + mailto (cloud of wanneer lokale opslag niet kan).
+ * @param {ShareReportContext} options
+ * @param {{ ok: true; url: string; recipients: string[]; subject: string; target: OutlookComposeTarget }} prepared
+ */
+async function shareReportViaEmailBrowserFallback(options, prepared) {
   const meetingSubject = options.meetingSubject.trim() || "Meeting";
   const reportBody = options.reportBody.trim();
   const filename = buildReportAttachmentFilename(meetingSubject);
@@ -416,7 +424,6 @@ export async function shareReportViaEmail(options) {
   });
 
   downloadBlobAttachment(filename, docxBlob);
-  // Korte pauze zodat download- en mail-dialoog niet tegelijk verschijnen
   await delay(400);
   openOutlookCompose(prepared.url, prepared.target);
 
@@ -426,8 +433,80 @@ export async function shareReportViaEmail(options) {
     subject: prepared.subject,
     target: prepared.target,
     filename,
+    docxFilename: filename,
+    mailOpened: false,
     composeUrl: prepared.url,
   };
+}
+
+/**
+ * @param {ShareReportContext & { recipientsInput: string; composeTarget?: OutlookComposeTarget }} options
+ * @returns {Promise<{ ok: true; recipients: string[]; subject: string; target: OutlookComposeTarget; filename: string; docxFilename?: string; mailOpened: boolean; composeUrl: string; bezoekverslagenDir?: string; mailError?: string } | { ok: false; error: string }>}
+ */
+export async function shareReportViaEmail(options) {
+  const prepared = prepareShareReportEmail(options);
+  if (!prepared.ok) return prepared;
+
+  const meetingSubject = options.meetingSubject.trim() || "Meeting";
+  const reportBody = options.reportBody.trim();
+  const dateTimeLabel = resolveReportDateTimeLabel(options);
+  const meetingDate =
+    options.meetingDate ?? extractMeetingDateFromReport(meetingSubject, reportBody);
+  const mailBody = buildGespreksverslagMailBody({
+    contactName: options.contactName,
+    meetingDate,
+    signature: options.mailSignature,
+  });
+
+  try {
+    const data = await apiPost("/api/share-report/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        meetingSubject,
+        reportBody,
+        dateTimeLabel,
+        recipients: prepared.recipients,
+        subject: prepared.subject,
+        mailBody,
+      }),
+    });
+
+    if (data.mailOpened) {
+      return {
+        ok: true,
+        recipients: prepared.recipients,
+        subject: prepared.subject,
+        target: prepared.target,
+        filename: data.pdfFilename,
+        docxFilename: data.docxFilename,
+        mailOpened: true,
+        bezoekverslagenDir: data.bezoekverslagenDir,
+        composeUrl: prepared.url,
+      };
+    }
+
+    if (data.pdfDownloadUrl && data.pdfFilename) {
+      await downloadServerAttachment(data.pdfDownloadUrl, data.pdfFilename);
+      await delay(400);
+    }
+    openOutlookCompose(prepared.url, prepared.target);
+
+    return {
+      ok: true,
+      recipients: prepared.recipients,
+      subject: prepared.subject,
+      target: prepared.target,
+      filename: data.pdfFilename,
+      docxFilename: data.docxFilename,
+      mailOpened: false,
+      bezoekverslagenDir: data.bezoekverslagenDir,
+      mailError: data.mailError,
+      composeUrl: prepared.url,
+    };
+  } catch {
+    return shareReportViaEmailBrowserFallback(options, prepared);
+  }
 }
 
 /**
@@ -466,11 +545,24 @@ export function syncShareEmailLink(anchor, ctx) {
 }
 
 /**
- * @param {string} filename
+ * @param {string | { filename: string; docxFilename?: string; mailOpened?: boolean; bezoekverslagenDir?: string }} result
  * @returns {string}
  */
-export function formatAttachmentShareSuccessMessage(filename) {
-  return `${filename} is gedownload. Voeg dit bestand handmatig toe als bijlage. Je mailprogramma wordt geopend.`;
+export function formatAttachmentShareSuccessMessage(result) {
+  if (typeof result === "string") {
+    return `${result} is gedownload. Voeg dit bestand handmatig toe als bijlage. Je mailprogramma wordt geopend.`;
+  }
+
+  const pdfName = result.filename;
+  const docxName = result.docxFilename ?? pdfName.replace(/\.pdf$/i, ".docx");
+
+  if (result.mailOpened) {
+    const dir = result.bezoekverslagenDir ? ` (${result.bezoekverslagenDir})` : "";
+    return `${docxName} en ${pdfName} opgeslagen in Bezoekverslagen${dir}. Outlook geopend met PDF-bijlage.`;
+  }
+
+  const dir = result.bezoekverslagenDir ? ` in Bezoekverslagen` : "";
+  return `${docxName} opgeslagen${dir}. ${pdfName} gedownload — voeg als bijlage toe. Je mailprogramma wordt geopend.`;
 }
 
 /**
@@ -523,7 +615,12 @@ export function initShareReportEmail(deps) {
       }
 
       deps.onFeedback?.(
-        formatAttachmentShareSuccessMessage(result.filename),
+        formatAttachmentShareSuccessMessage({
+          filename: result.filename,
+          docxFilename: result.docxFilename,
+          mailOpened: result.mailOpened,
+          bezoekverslagenDir: result.bezoekverslagenDir,
+        }),
         "success",
       );
     } catch {

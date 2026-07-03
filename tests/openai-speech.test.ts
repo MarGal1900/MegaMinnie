@@ -51,6 +51,9 @@ describe("synthesizeOpenAiSpeech", () => {
       voice: "verse",
       input: "Test zin.",
       response_format: "mp3",
+      speed: 1,
     });
+    expect(typeof body.instructions).toBe("string");
+    expect(body.instructions.length).toBeGreaterThan(0);
   });
 });

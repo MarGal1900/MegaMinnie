@@ -1,10 +1,46 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCaptureDialogueOpeningPrompt,
   REALTIME_QA_OPENING_TEXT,
   buildLiveRealtimeTranscript,
   buildRealtimeCallsRequest,
   readRealtimeTranscriptText,
+  requiresRemoteTrackBeforeOpening,
 } from "../public/js/realtime-interview.js";
+
+describe("buildCaptureDialogueOpeningPrompt", () => {
+  it("gebruikt seed-remainder zonder opnieuw naar onderwerp te vragen", () => {
+    const prompt = buildCaptureDialogueOpeningPrompt("task", "klant bellen morgen");
+    expect(prompt).toContain("klant bellen morgen");
+    expect(prompt).toContain("Vraag niet opnieuw naar het onderwerp");
+    expect(prompt).not.toContain("Waar gaat de taak over?");
+  });
+
+  it("combineert kernvragen bij agenda zonder seed", () => {
+    expect(buildCaptureDialogueOpeningPrompt("event")).toContain(
+      "Waar gaat de afspraak over en wanneer",
+    );
+  });
+
+  it("bevat korte-voorlezen-stijl, geen interview", () => {
+    expect(buildCaptureDialogueOpeningPrompt("correction")).toContain("geen interview");
+  });
+});
+
+describe("requiresRemoteTrackBeforeOpening", () => {
+  it("wacht niet op remote track bij correctie/taak/agenda", () => {
+    expect(
+      requiresRemoteTrackBeforeOpening({ correctionDialogue: true }),
+    ).toBe(false);
+    expect(
+      requiresRemoteTrackBeforeOpening({ captureDialogueKind: "event" }),
+    ).toBe(false);
+  });
+
+  it("wacht wel op remote track bij Vraag & Antwoord", () => {
+    expect(requiresRemoteTrackBeforeOpening()).toBe(true);
+  });
+});
 
 describe("realtime frontend request builder", () => {
   it("gebruikt Hallo als vaste Vraag & Antwoord opening", () => {

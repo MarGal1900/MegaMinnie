@@ -2018,6 +2018,10 @@ button[hidden] {
   margin-top: 0.75rem;
 }
 
+.subsection--events:not([hidden]) {
+  margin-top: 0.75rem;
+}
+
 .tasks-events-toolbar {
   display: flex;
   flex-wrap: wrap;

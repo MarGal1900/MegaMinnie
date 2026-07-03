@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+  EVENT_CAPTURE_REALTIME_INSTRUCTIONS,
   REALTIME_POC_INSTRUCTIONS,
   REALTIME_QA_STOP_RESPONSE_TEXT,
+  TASK_CAPTURE_REALTIME_INSTRUCTIONS,
+  getEventCaptureRealtimeInstructions,
   getRealtimeInstructions,
   getRealtimeModel,
   getRealtimeTranscriptionModel,
   getRealtimeVoice,
+  getTaskCaptureRealtimeInstructions,
   isRealtimeInterviewEnabled,
 } from "../src/lib/realtime-config.js";
 
@@ -56,5 +60,26 @@ describe("realtime Q&A stop response", () => {
   it("gebruikt custom instructies uit env wanneer gezet", () => {
     process.env.OPENAI_REALTIME_INSTRUCTIONS = "Custom instructies.";
     expect(getRealtimeInstructions()).toBe("Custom instructies.");
+  });
+});
+
+describe("task/event capture realtime instructies", () => {
+  afterEach(() => {
+    delete process.env.OPENAI_TASK_CAPTURE_REALTIME_INSTRUCTIONS;
+    delete process.env.OPENAI_EVENT_CAPTURE_REALTIME_INSTRUCTIONS;
+  });
+
+  it("bevat verplichte taakvelden en korte stijl", () => {
+    expect(TASK_CAPTURE_REALTIME_INSTRUCTIONS).toContain("onderwerp");
+    expect(TASK_CAPTURE_REALTIME_INSTRUCTIONS).toContain("activityDate");
+    expect(TASK_CAPTURE_REALTIME_INSTRUCTIONS).toContain("geen interview");
+    expect(getTaskCaptureRealtimeInstructions()).toBe(TASK_CAPTURE_REALTIME_INSTRUCTIONS);
+  });
+
+  it("bevat verplichte agendavelden en korte stijl", () => {
+    expect(EVENT_CAPTURE_REALTIME_INSTRUCTIONS).toContain("starttijd");
+    expect(EVENT_CAPTURE_REALTIME_INSTRUCTIONS).toContain("eindtijd");
+    expect(EVENT_CAPTURE_REALTIME_INSTRUCTIONS).toContain("geen interview");
+    expect(getEventCaptureRealtimeInstructions()).toBe(EVENT_CAPTURE_REALTIME_INSTRUCTIONS);
   });
 });

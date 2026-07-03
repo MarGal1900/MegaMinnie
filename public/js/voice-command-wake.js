@@ -6,9 +6,12 @@
 import {
   containsOkMegaMinnieWake,
   detectReviewVoiceCommand,
+  resolvePlaybackVoiceCommand,
   extractOkMegaMinnieWakeAnywhere,
+  isCaptureDialogueAffirmative,
   isLikelyReviewSpeechEcho,
   isStartVoorlezenCommand,
+  isVoorlezenOfferDecline,
   normalizeWakeCommandText,
   parseOkMegaMinnieWakeCommand,
   stripLeadingSpeechEcho,
@@ -18,10 +21,9 @@ import {
   getVoiceCommandAwaitingMessage,
   getVoiceCommandWakePromptMessage,
 } from "./voice-command-router.js";
-
 /** @typedef {"disconnected"|"connecting"|"listen_idle"|"wake_ack"|"awaiting_command"|"executing"|"playback_listen"} VoiceWakePhase */
 
-/** @typedef {"UPDATE_STATUS"|"SET_MIC"|"PLAY_WAKE_ACK"|"EXECUTE_COMMAND"|"PAUSE_PLAYBACK"|"SHOW_ACK_FAILED"} VoiceWakeEffect */
+/** @typedef {"UPDATE_STATUS"|"SET_MIC"|"PLAY_WAKE_ACK"|"EXECUTE_COMMAND"|"PAUSE_PLAYBACK"|"START_CORRECTION"|"SHOW_ACK_FAILED"} VoiceWakeEffect */
 
 /** @typedef {{
  *   phase: VoiceWakePhase;
@@ -70,10 +72,14 @@ export function getVoiceWakeStatusMessage(state, now = Date.now()) {
  * @param {VoiceWakeState} state
  * @param {string} key
  * @param {number} [now]
+ * @param {{ playbackActive?: boolean; inlineCaptureActive?: boolean }} [opts]
  */
-export function shouldSkipWakeDuplicate(state, key, now = Date.now()) {
+export function shouldSkipWakeDuplicate(state, key, now = Date.now(), opts = {}) {
   if (!key || key !== state.wakeDedupeKey) return false;
   if (now - state.wakeDedupeAt >= WAKE_DEDUPE_MS) return false;
+  // Tijdens voorlezen (zonder actieve inline-capture): Ok Minnie opnieuw moet altijd
+  // luistermodus kunnen openen — stale awaitingCommand na taak/agenda mag dat niet blokkeren.
+  if (opts.playbackActive && !opts.inlineCaptureActive) return false;
   return state.awaitingCommand || state.ackInProgress;
 }
 
@@ -115,8 +121,10 @@ export function reduceVoiceCommandWake(state, event) {
       };
 
     case "LISTEN_READY": {
-      const phase =
-        state.phase === "playback_listen" || state.phase === "executing"
+      const playbackActive = event.playbackActive === true;
+      const phase = playbackActive
+        ? "playback_listen"
+        : state.phase === "playback_listen" || state.phase === "executing"
           ? state.phase
           : "listen_idle";
       return {
@@ -124,6 +132,20 @@ export function reduceVoiceCommandWake(state, event) {
         effects: [{ type: "UPDATE_STATUS" }],
       };
     }
+
+    case "PLAYBACK_LISTEN_RESET":
+      return {
+        state: {
+          ...state,
+          phase: "playback_listen",
+          awaitingCommand: false,
+          ackInProgress: false,
+          pendingCommandDuringAck: null,
+          wakeDedupeKey: "",
+          wakeDedupeAt: 0,
+        },
+        effects: [{ type: "UPDATE_STATUS" }],
+      };
 
     case "LISTEN_LOST":
       return {
@@ -286,6 +308,18 @@ export function reduceVoiceCommandWake(state, event) {
       };
     }
 
+    case "VOORLEZEN_OFFER_AWAITING":
+      return {
+        state: {
+          ...state,
+          phase: state.listenReady ? "listen_idle" : state.phase,
+          awaitingCommand: true,
+          ackInProgress: false,
+          pendingCommandDuringAck: null,
+        },
+        effects: [{ type: "UPDATE_STATUS" }, { type: "SET_MIC", enabled: true }],
+      };
+
     case "STT":
       return reduceVoiceCommandWakeStt(state, event, effects);
 
@@ -296,7 +330,7 @@ export function reduceVoiceCommandWake(state, event) {
 
 /**
  * @param {VoiceWakeState} state
- * @param {{ text?: string; source?: string; playbackActive?: boolean; blocked?: boolean; echoText?: string }} event
+ * @param {{ text?: string; source?: string; playbackActive?: boolean; blocked?: boolean; echoText?: string; inlineCaptureActive?: boolean }} event
  * @param {VoiceWakeEffect[]} effects
  */
 function reduceVoiceCommandWakeStt(state, event, effects) {
@@ -309,13 +343,17 @@ function reduceVoiceCommandWakeStt(state, event, effects) {
   const wakeOnly = isOkMinnieWakeOnlyPhrase(text);
   const wakeKey = normalizeWakeKey(text);
   const playbackActive = event.playbackActive === true;
+  const skipWakeOpts = {
+    playbackActive,
+    inlineCaptureActive: event.inlineCaptureActive === true,
+  };
   if (playbackActive) {
     // Schone "Ok Minnie, maak taak/agenda/correctie …" in één uiting (wake-woord netjes aan
     // het begin, met een echt commando erna): ook tijdens voorlezen direct de actiemodus in,
     // net als buiten voorlezen om — geen aparte "Wat kan ik voor je doen?"-bevestiging nodig
     // als de gebruiker het commando al heeft meegegeven.
     const wakeWithCommand = parseOkMegaMinnieWakeCommand(text);
-    if (wakeWithCommand.wakeDetected && !wakeWithCommand.wakeOnly && state.listenReady) {
+    if (wakeWithCommand.wakeDetected && !wakeWithCommand.wakeOnly) {
       effects.push({ type: "EXECUTE_COMMAND", text });
       return { state: { ...state, phase: "executing" }, effects, handled: true };
     }
@@ -324,23 +362,20 @@ function reduceVoiceCommandWakeStt(state, event, effects) {
     // containsOkMegaMinnieWake vangt "ok (mega)minnie" op elke positie, alleen relevant
     // hier tijdens playback (zelfde aanpak als containsReviewCorrectieCommand voor
     // "Correctie"). Dit was de reden dat "Ok Minnie" tijdens voorlezen herhaald moest worden.
-    if ((wakeOnly || containsOkMegaMinnieWake(text)) && state.listenReady) {
-      if (shouldSkipWakeDuplicate(state, wakeKey)) {
+    if (wakeOnly || containsOkMegaMinnieWake(text)) {
+      if (shouldSkipWakeDuplicate(state, wakeKey, Date.now(), skipWakeOpts)) {
         return { state, effects: [], handled: true };
       }
       // Wake-woord midden in de uiting met een direct herkenbaar commando erna
       // ("...echo... ok minnie maak een taak aan"): meteen uitvoeren, mits de rest geen
       // TTS-echo van de laatst voorgelezen chunk is.
-      const anywhere = extractOkMegaMinnieWakeAnywhere(text);
       const echoText = typeof event.echoText === "string" ? event.echoText : "";
+      const playbackResolved = resolvePlaybackVoiceCommand(text);
       if (
-        anywhere.wakeDetected &&
-        !anywhere.wakeOnly &&
-        !isLikelyReviewSpeechEcho(anywhere.commandText, echoText) &&
-        (detectReviewVoiceCommand(anywhere.commandText) ||
-          isStartVoorlezenCommand(anywhere.commandText))
+        playbackResolved &&
+        !isLikelyReviewSpeechEcho(playbackResolved.effectiveText, echoText)
       ) {
-        effects.push({ type: "EXECUTE_COMMAND", text: anywhere.commandText });
+        effects.push({ type: "EXECUTE_COMMAND", text: playbackResolved.effectiveText });
         return { state: { ...state, phase: "executing" }, effects, handled: true };
       }
       // Tijdens voorlezen GEEN gesproken "Wat kan ik voor je doen?"-bevestiging: het
@@ -389,7 +424,9 @@ function reduceVoiceCommandWakeStt(state, event, effects) {
 
   if (state.awaitingCommand || state.pttActive) {
     if (wakeOnly) {
-      if (shouldSkipWakeDuplicate(state, wakeKey)) return { state, effects: [], handled: true };
+      if (shouldSkipWakeDuplicate(state, wakeKey, Date.now(), skipWakeOpts)) {
+        return { state, effects: [], handled: true };
+      }
       return startWakeAck(state, wakeKey, effects);
     }
     // Echo-filter: de STT-transcriptie van de eigen bevestiging ("Wat kan ik voor je doen?")
@@ -477,6 +514,7 @@ function reduceVoiceCommandWakeStt(state, event, effects) {
 function isLowConfidenceWakeRemainder(remainder) {
   const trimmed = String(remainder || "").trim();
   if (!trimmed) return true;
+  if (isCaptureDialogueAffirmative(trimmed) || isVoorlezenOfferDecline(trimmed)) return false;
   if (detectReviewVoiceCommand(trimmed) || isStartVoorlezenCommand(trimmed)) return false;
   return trimmed.split(/\s+/).length < 3;
 }
@@ -492,6 +530,8 @@ function isLowConfidenceWakeRemainder(remainder) {
  */
 function startPlaybackWakeListen(state, wakeKey, effects) {
   effects.push({ type: "PAUSE_PLAYBACK" });
+  // Alleen pauzeren en luisteren — geen correctiedialoog. Commando's (taak/agenda/correctie)
+  // worden daarna via EXECUTE_COMMAND of maybeHandleReviewVoiceCommand afgehandeld.
   effects.push({ type: "SET_MIC", enabled: true });
   effects.push({ type: "UPDATE_STATUS" });
   return {
@@ -543,6 +583,7 @@ function startWakeAck(state, wakeKey, effects) {
  *   onPlayWakeAck?: (generation: number, wakeKey: string) => Promise<void>;
  *   onExecuteCommand?: (text: string) => void;
  *   onPausePlayback?: () => void;
+ *   onStartCorrection?: () => void;
  *   onAckFailed?: () => void;
  * }} options
  */
@@ -558,6 +599,8 @@ export function createVoiceCommandWakeController(options = {}) {
         options.onMicEnabled?.(effect.enabled === true);
       } else if (effect.type === "PAUSE_PLAYBACK") {
         options.onPausePlayback?.();
+      } else if (effect.type === "START_CORRECTION") {
+        options.onStartCorrection?.();
       } else if (effect.type === "PLAY_WAKE_ACK") {
         void options.onPlayWakeAck?.(effect.generation, effect.wakeKey)?.catch(() => {
           dispatch({ type: "WAKE_ACK_FAILED", generation: effect.generation });
@@ -580,7 +623,7 @@ export function createVoiceCommandWakeController(options = {}) {
 
   return {
     dispatch,
-    /** @param {{ text: string; source?: string; playbackActive?: boolean; blocked?: boolean; echoText?: string }} ctx */
+    /** @param {{ text: string; source?: string; playbackActive?: boolean; blocked?: boolean; echoText?: string; inlineCaptureActive?: boolean }} ctx */
     handleStt(ctx) {
       return dispatch({ type: "STT", ...ctx });
     },

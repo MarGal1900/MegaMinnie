@@ -48,17 +48,24 @@ export function resolveInlineCaptureIntent(cmd) {
 export function getInlineCaptureStatusMessage(intent, hasSegments = false) {
   if (intent === "task") {
     return hasSegments
-      ? 'Taak bijgewerkt — spreek verder of zeg "Voorlezen"'
+      ? "Taak bijgewerkt — Mini vraagt zo of ze verder mag voorlezen"
       : "Maak taak — spreek de taak in…";
   }
   if (intent === "event") {
     return hasSegments
-      ? 'Agenda bijgewerkt — spreek verder of zeg "Voorlezen"'
+      ? "Agenda bijgewerkt — Mini vraagt zo of ze verder mag voorlezen"
       : "Maak agenda — spreek het agenda-item in…";
   }
   return hasSegments
-    ? 'Tekst bijgewerkt — spreek verder of zeg "Voorlezen"'
+    ? "Tekst bijgewerkt — Mini vraagt zo of ze verder mag voorlezen"
     : "Corrigeren — spreek je aanpassing in…";
+}
+
+/** @param {"correction"|"task"|"event"} intent */
+export function getInlineCaptureDialogueStatusMessage(intent) {
+  if (intent === "task") return "Taak — kort antwoorden…";
+  if (intent === "event") return "Agenda — kort antwoorden…";
+  return "Correctie — kort antwoorden…";
 }
 
 /** @param {InlineCaptureIntent} intent */
@@ -71,12 +78,12 @@ export function getInlineCaptureProcessingStatus(intent) {
 /** @param {InlineCaptureIntent} intent */
 export function getInlineCaptureFailureStatus(intent) {
   if (intent === "task") {
-    return 'Taak mislukt — spreek opnieuw of zeg "Voorlezen"';
+    return "Taak mislukt — bespreek het opnieuw met Mini";
   }
   if (intent === "event") {
-    return 'Agenda-item mislukt — spreek opnieuw of zeg "Voorlezen"';
+    return "Agenda-item mislukt — bespreek het opnieuw met Mini";
   }
-  return 'Correctie mislukt — spreek opnieuw of zeg "Voorlezen"';
+  return "Correctie mislukt — bespreek het opnieuw met Mini";
 }
 
 /** @param {{ active: boolean; flushedSegmentCount: number; applyInFlight: boolean; finalizeInFlight: boolean }} state */

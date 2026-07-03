@@ -137,6 +137,44 @@ describe("reduceVoiceCommandWake STT", () => {
     expect(result.delegate).toBe("review");
     expect(result.handled).toBe(false);
   });
+
+  it("voert ja uit na voorlezen-aanbod (awaiting_command)", () => {
+    const state = {
+      ...createInitialVoiceCommandWakeState(),
+      phase: "listen_idle" as const,
+      listenReady: true,
+      awaitingCommand: true,
+    };
+    const result = reduceVoiceCommandWake(state, {
+      type: "STT",
+      text: "ja",
+      source: "final",
+      playbackActive: false,
+    });
+    expect(result.handled).toBe(true);
+    expect(result.effects.some((e) => e.type === "EXECUTE_COMMAND" && e.text === "ja")).toBe(
+      true,
+    );
+  });
+
+  it("voert Ok Minnie ja direct uit i.p.v. wake ack", () => {
+    const state = {
+      ...createInitialVoiceCommandWakeState(),
+      phase: "listen_idle" as const,
+      listenReady: true,
+    };
+    const result = reduceVoiceCommandWake(state, {
+      type: "STT",
+      text: "Ok Minnie, ja",
+      source: "final",
+      playbackActive: false,
+    });
+    expect(result.handled).toBe(true);
+    expect(result.effects.some((e) => e.type === "EXECUTE_COMMAND" && e.text === "Ok Minnie, ja")).toBe(
+      true,
+    );
+    expect(result.effects.some((e) => e.type === "PLAY_WAKE_ACK")).toBe(false);
+  });
 });
 
 describe("shouldSkipWakeDuplicate", () => {
@@ -150,6 +188,21 @@ describe("shouldSkipWakeDuplicate", () => {
     expect(shouldSkipWakeDuplicate(state, "ok minnie", 1500)).toBe(true);
     expect(shouldSkipWakeDuplicate(state, "ok minnie", 2500)).toBe(false);
     expect(shouldSkipWakeDuplicate(state, "ok megaminnie", 1500)).toBe(false);
+  });
+
+  it("slaat tijdens voorlezen niet over als er geen inline-capture actief is", () => {
+    const state = {
+      ...createInitialVoiceCommandWakeState(),
+      awaitingCommand: true,
+      wakeDedupeKey: "ok minnie",
+      wakeDedupeAt: 1000,
+    };
+    expect(
+      shouldSkipWakeDuplicate(state, "ok minnie", 1500, {
+        playbackActive: true,
+        inlineCaptureActive: false,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -173,6 +226,26 @@ describe("createVoiceCommandWakeController", () => {
     expect(ctrl.isAwaitingCommand()).toBe(true);
     expect(ctrl.isAckInProgress()).toBe(false);
     expect(statuses.at(-1)).toBe("Ik luister…");
+  });
+
+  it("pauzeert en luistert na Ok Minnie tijdens voorlezen (geen correctiedialoog)", () => {
+    let paused = false;
+    let correctionStarted = false;
+    const ctrl = createVoiceCommandWakeController({
+      onPausePlayback: () => {
+        paused = true;
+      },
+      onStartCorrection: () => {
+        correctionStarted = true;
+      },
+      onMicEnabled: () => {},
+    });
+    ctrl.dispatch({ type: "LISTEN_READY" });
+    ctrl.dispatch({ type: "PLAYBACK_STARTED" });
+    ctrl.handleStt({ text: "Ok Minnie", source: "final", playbackActive: true });
+    expect(paused).toBe(true);
+    expect(correctionStarted).toBe(false);
+    expect(ctrl.isAwaitingCommand()).toBe(true);
   });
 });
 

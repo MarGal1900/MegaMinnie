@@ -160,6 +160,7 @@ describe("'Ok Minnie' midden in TTS-echo (repeat-probleem tijdens voorlezen)", (
     expect(result.state.phase).toBe("playback_listen");
     expect(result.state.awaitingCommand).toBe(true);
     expect(result.effects.some((e) => e.type === "PAUSE_PLAYBACK")).toBe(true);
+    expect(result.effects.some((e) => e.type === "START_CORRECTION")).toBe(false);
     expect(result.effects.some((e) => e.type === "PLAY_WAKE_ACK")).toBe(false);
   });
 
@@ -184,6 +185,7 @@ describe("'Ok Minnie' midden in TTS-echo (repeat-probleem tijdens voorlezen)", (
     expect(result.handled).toBe(true);
     expect(result.state.awaitingCommand).toBe(true);
     expect(result.effects.some((e) => e.type === "PAUSE_PLAYBACK")).toBe(true);
+    expect(result.effects.some((e) => e.type === "START_CORRECTION")).toBe(false);
     expect(result.effects.some((e) => e.type === "PLAY_WAKE_ACK")).toBe(false);
     expect(result.effects.some((e) => e.type === "SET_MIC" && e.enabled === true)).toBe(true);
   });

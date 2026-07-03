@@ -3,12 +3,27 @@ import { getOpenAiApiKey, getRealtimeVoice } from "./realtime-config.js";
 export const DEFAULT_SPEECH_MODEL = "gpt-4o-mini-tts";
 export const MAX_SPEECH_INPUT_CHARS = 4096;
 
+/** Zelfde toon/tempo als de Realtime-wijzigingsdialoog (correctie/taak/agenda). */
+export const DEFAULT_SPEECH_INSTRUCTIONS =
+  "Spreek natuurlijk en rustig Nederlands. Houd antwoorden kort en helder — dezelfde toon als een MegaMinnie-wijzigingsgesprek.";
+
 export function getSpeechModel(): string {
   return process.env.OPENAI_SPEECH_MODEL?.trim() || DEFAULT_SPEECH_MODEL;
 }
 
 export function getSpeechVoice(): string {
   return getRealtimeVoice();
+}
+
+export function getSpeechInstructions(): string {
+  return process.env.OPENAI_SPEECH_INSTRUCTIONS?.trim() || DEFAULT_SPEECH_INSTRUCTIONS;
+}
+
+export function getSpeechSpeed(): number {
+  const raw = process.env.OPENAI_SPEECH_SPEED?.trim();
+  if (!raw) return 1.0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0.25 && n <= 4.0 ? n : 1.0;
 }
 
 export type SpeechPrereqResult =
@@ -41,6 +56,8 @@ export async function synthesizeOpenAiSpeech(params: {
   apiKey?: string;
   model?: string;
   voice?: string;
+  instructions?: string;
+  speed?: number;
   fetchImpl?: typeof fetch;
 }): Promise<Buffer> {
   const apiKey = params.apiKey?.trim() || getOpenAiApiKey();
@@ -63,6 +80,8 @@ export async function synthesizeOpenAiSpeech(params: {
       voice,
       input: params.text,
       response_format: "mp3",
+      instructions: params.instructions ?? getSpeechInstructions(),
+      speed: params.speed ?? getSpeechSpeed(),
     }),
   });
 

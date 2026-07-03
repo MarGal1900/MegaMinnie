@@ -289,6 +289,26 @@ export function setTasksEventsToolbarVisible(show) {
   updateTasksEventsSectionsVisibility();
 }
 
+/**
+ * Toon taken/agenda onderaan het verslag en scroll ernaartoe (bijv. na spraak tijdens voorlezen).
+ * @param {"tasks"|"events"} kind
+ */
+export function revealTasksEventsSection(kind) {
+  if (!tasksEventsOutputVisible) {
+    tasksEventsOutputVisible = true;
+  }
+  updateTasksEventsSectionsVisibility();
+  const listId = kind === "tasks" ? "tasks-list" : "events-list";
+  const sectionId = kind === "tasks" ? "tasks-section" : "events-section";
+  if (!hasListItems(listId)) return false;
+  const section = $(sectionId);
+  const list = $(listId);
+  if (section) section.hidden = false;
+  const target = list?.lastElementChild ?? section;
+  target?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  return true;
+}
+
 /** @param {TasksEventsControlOptions} [options] */
 export function initTasksEventsControls(options = {}) {
   const getDefaultAssignee = () =>

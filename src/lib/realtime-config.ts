@@ -12,10 +12,33 @@ export const REALTIME_POC_INSTRUCTIONS =
   `Als de gebruiker 'stop' of 'stoppen' zegt, zeg exact: '${REALTIME_QA_STOP_RESPONSE_TEXT}' en wacht af. ` +
   "Als de gebruiker 'annuleer' of 'annuleren' zegt, bevestig kort dat het gesprek is afgebroken en wacht af.";
 
+/** Korte stijl voor onderbrekingen tijdens voorlezen — niet van toepassing op Vraag & Antwoord. */
+const PLAYBACK_CAPTURE_BRIEF_STYLE =
+  "Dit is een korte onderbreking tijdens voorlezen — geen interview. " +
+  "Maximaal één verduidelijkingsvraag als iets echt onduidelijk is. " +
+  "Herhaal niet wat de gebruiker al zei. Geen veld-voor-veld vragenlijst. " +
+  "Antwoorden: maximaal één korte zin. " +
+  "Als de gebruiker klaar is of 'klaar'/'ja' zegt, vraag exact: " +
+  "'Ben je klaar? Zal ik verder gaan met voorlezen?'";
+
 export const SUPPLEMENT_REALTIME_INSTRUCTIONS =
-  "Je helpt de gebruiker mondeling een correctie door te geven op een bestaand klantverslag dat net wordt voorgelezen. " +
-  "Luister naar de correctie, stel kort een verduidelijkingsvraag als iets onduidelijk is, en bevestig kort wat je hebt verstaan. " +
-  "Houd antwoorden kort en natuurlijk. Wacht tot de gebruiker klaar is met de correctie.";
+  `${PLAYBACK_CAPTURE_BRIEF_STYLE} ` +
+  "Je helpt de gebruiker mondeling een correctie door te geven op een voorgelezen klantverslag. " +
+  "Accepteer de correctie zoals gegeven; vraag alleen door bij echte onduidelijkheid.";
+
+export const TASK_CAPTURE_REALTIME_INSTRUCTIONS =
+  `${PLAYBACK_CAPTURE_BRIEF_STYLE} ` +
+  "Je helpt een taak in Salesforce aan te maken tijdens voorlezen. " +
+  "Verzamel minimaal onderwerp (subject) en uiterste datum (activityDate); overige velden optioneel. " +
+  "Vraag ontbrekende kerngegevens in één korte vraag, niet veld voor veld. " +
+  "Verzin geen details die de gebruiker niet noemde.";
+
+export const EVENT_CAPTURE_REALTIME_INSTRUCTIONS =
+  `${PLAYBACK_CAPTURE_BRIEF_STYLE} ` +
+  "Je helpt een agenda-item in Salesforce aan te maken tijdens voorlezen. " +
+  "Verzamel minimaal onderwerp (subject), datum, starttijd en eindtijd; beschrijving optioneel. " +
+  "Vraag ontbrekende kerngegevens in één korte vraag, niet veld voor veld. " +
+  "Verzin geen details die de gebruiker niet noemde.";
 
 export function isRealtimeInterviewEnabled(): boolean {
   return process.env.REALTIME_INTERVIEW_ENABLED?.trim().toLowerCase() === "true";
@@ -44,6 +67,20 @@ export function getSupplementRealtimeInstructions(): string {
   return (
     process.env.OPENAI_SUPPLEMENT_REALTIME_INSTRUCTIONS?.trim() ||
     SUPPLEMENT_REALTIME_INSTRUCTIONS
+  );
+}
+
+export function getTaskCaptureRealtimeInstructions(): string {
+  return (
+    process.env.OPENAI_TASK_CAPTURE_REALTIME_INSTRUCTIONS?.trim() ||
+    TASK_CAPTURE_REALTIME_INSTRUCTIONS
+  );
+}
+
+export function getEventCaptureRealtimeInstructions(): string {
+  return (
+    process.env.OPENAI_EVENT_CAPTURE_REALTIME_INSTRUCTIONS?.trim() ||
+    EVENT_CAPTURE_REALTIME_INSTRUCTIONS
   );
 }
 

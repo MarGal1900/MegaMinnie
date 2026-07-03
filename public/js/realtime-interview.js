@@ -1,10 +1,28 @@
 import { apiPost } from "./api.js";
 import {
+  CAPTURE_DIALOGUE_BRIEF_STYLE,
+  CAPTURE_DIALOGUE_CLOSING_INSTRUCTION,
+  stripAssistantEchoFromUserSpeech,
+} from "./interview-commands.js";
+import {
   alertMicrophoneError,
   buildMicrophoneConstraints,
   requestMicrophoneStream,
   stopMediaStream,
 } from "./media-permissions.js";
+
+export function requiresRemoteTrackBeforeOpening({
+  listenOnly = false,
+  passiveListen = false,
+  captureDialogueKind = null,
+  correctionDialogue = false,
+  correctionDialogueActive = false,
+} = {}) {
+  const captureSession = Boolean(
+    captureDialogueKind || correctionDialogue || correctionDialogueActive,
+  );
+  return !listenOnly && !passiveListen && !captureSession;
+}
 
 const OPENAI_REALTIME_WEBRTC_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 export const REALTIME_QA_OPENING_TEXT = "Hallo";
@@ -12,6 +30,12 @@ const OPENING_PROMPT =
   `Zeg nu hardop uitsluitend het ene woord "${REALTIME_QA_OPENING_TEXT}". ` +
   "Geen andere woorden, geen extra zin. Wacht daarna stil tot de gebruiker antwoordt.";
 const OPENING_GREETING_FALLBACK_MS = 1500;
+/** Correctie/taak/agenda: opening niet laten wachten op remote audio-track. */
+const CAPTURE_OPENING_GREETING_FALLBACK_MS = 400;
+/** Geen assistent-antwoord na opening → opnieuw proberen of fout tonen. */
+const CAPTURE_OPENING_RESPONSE_TIMEOUT_MS = 12_000;
+/** Mic mag nooit langer dan dit uit blijven (vastgelopen response). */
+const ASSISTANT_ECHO_MIC_FAILSAFE_MS = 15_000;
 /**
  * Android/Chrome schakelt de audio-output naar een zachtere "communicatie"-modus zodra de
  * microfoon (met echoCancellation/autoGainControl) volledig actief is voor de duplex-sessie.
@@ -21,11 +45,47 @@ const OPENING_GREETING_FALLBACK_MS = 1500;
  * sessie (niet voor de stille listen-only correctieflow).
  */
 const REALTIME_QA_OUTPUT_GAIN = 1.6;
+/** Mic uit tijdens Mini's antwoord + korte grace — voorkomt dat assistent-echo als gebruiker in STT komt. */
+const ASSISTANT_ECHO_MIC_GRACE_MS = 500;
+
 const CORRECTION_OPENING_PROMPT =
-  "De gebruiker wil het voorgelezen verslag corrigeren of aanvullen. " +
-  "Begin met exact te vragen: 'Wat wil je corrigeren of aanvullen?' " +
-  "Luister daarna naar de correctie, stel kort een verduidelijkingsvraag als dat nodig is, " +
-  "en bevestig kort wat je hebt verstaan. Houd antwoorden kort.";
+  "Zeg exact: 'Wat wil je corrigeren?' Geen inleiding, geen uitleg.";
+
+const TASK_CAPTURE_OPENING_PROMPT =
+  "Vraag in één korte zin: 'Waar gaat de taak over en wanneer moet die af?' " +
+  "Daarna alleen nog wat echt ontbreekt — maximaal één verduidelijkingsvraag.";
+
+const EVENT_CAPTURE_OPENING_PROMPT =
+  "Vraag in één korte zin: 'Waar gaat de afspraak over en wanneer?' " +
+  "Daarna alleen nog wat echt ontbreekt — maximaal één verduidelijkingsvraag.";
+
+/**
+ * @param {"correction"|"task"|"event"|null | undefined} kind
+ * @param {string} [seedRemainder]
+ */
+export function buildCaptureDialogueOpeningPrompt(kind, seedRemainder = "") {
+  const remainder = String(seedRemainder || "").replace(/\s+/g, " ").trim();
+  let base;
+  if (kind === "task") {
+    base = remainder
+      ? `De gebruiker gaf al taakinformatie: "${remainder}". Vraag niet opnieuw naar het onderwerp. ` +
+        "Vraag alleen in één korte zin naar ontbrekende uiterste datum of verantwoordelijke als dat nog ontbreekt; " +
+        "anders ga meteen naar de afsluitvraag."
+      : TASK_CAPTURE_OPENING_PROMPT;
+  } else if (kind === "event") {
+    base = remainder
+      ? `De gebruiker gaf al agendainformatie: "${remainder}". Vraag niet opnieuw naar het onderwerp. ` +
+        "Vraag alleen in één korte zin naar ontbrekende datum of tijd als dat nog ontbreekt; " +
+        "anders ga meteen naar de afsluitvraag."
+      : EVENT_CAPTURE_OPENING_PROMPT;
+  } else {
+    base = remainder
+      ? `De gebruiker wil corrigeren en zei al: "${remainder}". Herhaal dat niet. ` +
+        "Zeg alleen 'Oké' of stel maximaal één korte verduidelijkingsvraag als iets onduidelijk is."
+      : CORRECTION_OPENING_PROMPT;
+  }
+  return `${base} ${CAPTURE_DIALOGUE_BRIEF_STYLE} ${CAPTURE_DIALOGUE_CLOSING_INSTRUCTION}`;
+}
 const FALLBACK_REALTIME_ERROR = "Realtime sessie kon niet worden gestart.";
 
 function isDebugRuntime() {
@@ -182,6 +242,77 @@ export function createRealtimeInterviewController(options) {
   /** @type {MediaStreamAudioSourceNode | null} */
   let outputSourceNode = null;
   let correctionDialogueActive = false;
+  /** @type {"correction"|"task"|"event"|null} */
+  let captureDialogueKind = null;
+  let captureSeedRemainder = "";
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let micRestoreTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let micMuteFailsafeTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let openingResponseWatchdog = null;
+
+  const isCaptureDialogueSession = () =>
+    Boolean(captureDialogueKind || correctionDialogue || correctionDialogueActive);
+
+  const requiresRemoteTrackForOpening = () =>
+    requiresRemoteTrackBeforeOpening({
+      listenOnly,
+      passiveListen,
+      captureDialogueKind,
+      correctionDialogue,
+      correctionDialogueActive,
+    });
+
+  const shouldMuteMicDuringAssistant = () =>
+    !passiveListen &&
+    Boolean(
+      captureDialogueKind ||
+        correctionDialogue ||
+        correctionDialogueActive ||
+        !listenOnly,
+    );
+
+  const getAssistantEchoSources = () => {
+    /** @type {string[]} */
+    const sources = turns.filter((turn) => turn.role === "assistant").map((turn) => turn.text);
+    const pending = pendingAssistantTranscript.replace(/\s+/g, " ").trim();
+    if (pending) sources.push(pending);
+    return sources;
+  };
+
+  const sanitizeUserSpeech = (rawText) =>
+    stripAssistantEchoFromUserSpeech(rawText, getAssistantEchoSources());
+
+  const muteMicForAssistantEcho = () => {
+    if (!shouldMuteMicDuringAssistant()) return;
+    if (micRestoreTimer) {
+      clearTimeout(micRestoreTimer);
+      micRestoreTimer = null;
+    }
+    if (micMuteFailsafeTimer) clearTimeout(micMuteFailsafeTimer);
+    setMicEnabled(false);
+    micMuteFailsafeTimer = setTimeout(() => {
+      micMuteFailsafeTimer = null;
+      setMicEnabled(true);
+    }, ASSISTANT_ECHO_MIC_FAILSAFE_MS);
+  };
+
+  const restoreMicAfterAssistantEcho = () => {
+    if (micMuteFailsafeTimer) {
+      clearTimeout(micMuteFailsafeTimer);
+      micMuteFailsafeTimer = null;
+    }
+    if (!shouldMuteMicDuringAssistant()) {
+      setMicEnabled(true);
+      return;
+    }
+    if (micRestoreTimer) clearTimeout(micRestoreTimer);
+    micRestoreTimer = setTimeout(() => {
+      micRestoreTimer = null;
+      setMicEnabled(true);
+    }, ASSISTANT_ECHO_MIC_GRACE_MS);
+  };
   let active = false;
   let connecting = false;
   let openingGreetingSent = false;
@@ -235,22 +366,25 @@ export function createRealtimeInterviewController(options) {
   const buildLiveTranscript = () =>
     buildLiveRealtimeTranscript(turns, pendingUserTranscript, pendingAssistantTranscript);
 
-  const buildUserTranscript = () =>
-    turns
+  const buildUserTranscript = () => {
+    const assistantTexts = turns.filter((turn) => turn.role === "assistant").map((turn) => turn.text);
+    return turns
       .filter((turn) => turn.role === "user")
-      .map((turn) => turn.text)
+      .map((turn) => stripAssistantEchoFromUserSpeech(turn.text, assistantTexts))
+      .filter(Boolean)
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
+  };
 
   const emitTranscript = () => {
     options.onTranscriptUpdate?.(buildLiveTranscript());
   };
 
   const flushPendingTurns = () => {
-    const user = pendingUserTranscript.replace(/\s+/g, " ").trim();
+    const user = sanitizeUserSpeech(pendingUserTranscript);
+    pendingUserTranscript = "";
     if (user) {
-      pendingUserTranscript = "";
       const last = turns[turns.length - 1];
       if (!(last && last.role === "user" && last.text.toLowerCase() === user.toLowerCase())) {
         turns.push({ role: "user", text: user });
@@ -277,6 +411,33 @@ export function createRealtimeInterviewController(options) {
       clearTimeout(openingGreetingFallbackTimer);
       openingGreetingFallbackTimer = null;
     }
+    if (openingResponseWatchdog) {
+      clearTimeout(openingResponseWatchdog);
+      openingResponseWatchdog = null;
+    }
+  };
+
+  const clearOpeningResponseWatchdog = () => {
+    if (openingResponseWatchdog) {
+      clearTimeout(openingResponseWatchdog);
+      openingResponseWatchdog = null;
+    }
+  };
+
+  const scheduleOpeningResponseWatchdog = () => {
+    if (!isCaptureDialogueSession()) return;
+    clearOpeningResponseWatchdog();
+    openingResponseWatchdog = setTimeout(() => {
+      openingResponseWatchdog = null;
+      if (!active || turns.some((turn) => turn.role === "assistant")) return;
+      restoreMicAfterAssistantEcho();
+      openingGreetingSent = false;
+      if (sendOpeningGreeting()) return;
+      setStatus("Mini reageert niet — probeer opnieuw.");
+      options.onError?.(
+        "Mini start het correctiegesprek niet. Zeg opnieuw Correctie of herlaad de pagina.",
+      );
+    }, CAPTURE_OPENING_RESPONSE_TIMEOUT_MS);
   };
 
   const ensureRemoteAudio = () => {
@@ -337,10 +498,15 @@ export function createRealtimeInterviewController(options) {
       clearTimeout(openingGreetingFallbackTimer);
       openingGreetingFallbackTimer = null;
     }
-    const instructions =
-      correctionDialogue || correctionDialogueActive
-        ? CORRECTION_OPENING_PROMPT
-        : OPENING_PROMPT;
+    const isCaptureDialogue =
+      captureDialogueKind || correctionDialogue || correctionDialogueActive;
+    const instructions = isCaptureDialogue
+      ? buildCaptureDialogueOpeningPrompt(
+          captureDialogueKind ||
+            (correctionDialogue || correctionDialogueActive ? "correction" : null),
+          captureSeedRemainder,
+        )
+      : OPENING_PROMPT;
     dataChannel.send(
       JSON.stringify({
         type: "response.create",
@@ -350,10 +516,15 @@ export function createRealtimeInterviewController(options) {
         },
       }),
     );
+    scheduleOpeningResponseWatchdog();
     setStatus(
-      correctionDialogue || correctionDialogueActive
-        ? "Correctie bespreken…"
-        : `MegaMinnie: ${REALTIME_QA_OPENING_TEXT}…`,
+      captureDialogueKind === "task"
+        ? "Taak bespreken…"
+        : captureDialogueKind === "event"
+          ? "Agenda bespreken…"
+          : isCaptureDialogue
+            ? "Correctie bespreken…"
+            : `MegaMinnie: ${REALTIME_QA_OPENING_TEXT}…`,
     );
     return true;
   };
@@ -361,29 +532,41 @@ export function createRealtimeInterviewController(options) {
   const maybeSendOpeningGreeting = () => {
     if (openingGreetingSent || listenOnly || passiveListen) return;
     if (!dataChannelReady) return;
-    if (!remoteTrackReady) return;
+    if (requiresRemoteTrackForOpening() && !remoteTrackReady) return;
     sendOpeningGreeting();
   };
 
   const scheduleOpeningGreetingFallback = () => {
     if (openingGreetingFallbackTimer) clearTimeout(openingGreetingFallbackTimer);
+    const delayMs = isCaptureDialogueSession()
+      ? CAPTURE_OPENING_GREETING_FALLBACK_MS
+      : OPENING_GREETING_FALLBACK_MS;
     openingGreetingFallbackTimer = setTimeout(() => {
       openingGreetingFallbackTimer = null;
-      if (openingGreetingSent || listenOnly || passiveListen || !dataChannelReady) return;
+      if (openingGreetingSent || listenOnly || passiveListen) return;
+      if (!dataChannelReady) return;
+      if (!requiresRemoteTrackForOpening()) {
+        sendOpeningGreeting();
+        return;
+      }
       remoteTrackReady = true;
       sendOpeningGreeting();
-    }, OPENING_GREETING_FALLBACK_MS);
+    }, delayMs);
   };
 
   /** @param {"assistant"|"user"} role @param {string} rawText */
   const addTurn = (role, rawText) => {
-    const text = String(rawText || "").replace(/\s+/g, " ").trim();
+    let text = String(rawText || "").replace(/\s+/g, " ").trim();
+    if (role === "user") text = sanitizeUserSpeech(text);
     if (!text) return;
     const last = turns[turns.length - 1];
     if (last && last.role === role && last.text.toLowerCase() === text.toLowerCase()) return;
     turns.push({ role, text });
     if (role === "user") pendingUserTranscript = "";
-    if (role === "assistant") pendingAssistantTranscript = "";
+    if (role === "assistant") {
+      pendingAssistantTranscript = "";
+      clearOpeningResponseWatchdog();
+    }
     options.onTurn?.({ role, text });
     emitTranscript();
   };
@@ -426,7 +609,17 @@ export function createRealtimeInterviewController(options) {
     pendingUserTranscript = "";
     pendingAssistantTranscript = "";
     lastCompletedUserTranscript = "";
+    if (micRestoreTimer) {
+      clearTimeout(micRestoreTimer);
+      micRestoreTimer = null;
+    }
+    if (micMuteFailsafeTimer) {
+      clearTimeout(micMuteFailsafeTimer);
+      micMuteFailsafeTimer = null;
+    }
     correctionDialogueActive = false;
+    captureDialogueKind = null;
+    captureSeedRemainder = "";
     mutedRemoteStream = null;
     if (dataChannel) {
       try {
@@ -449,8 +642,9 @@ export function createRealtimeInterviewController(options) {
     }
 
     if (localStream) {
-      localStream.getTracks().forEach((track) => {
+      localStream.getAudioTracks().forEach((track) => {
         try {
+          track.enabled = true;
           track.stop();
         } catch {
           /* noop */
@@ -516,10 +710,11 @@ export function createRealtimeInterviewController(options) {
     if (speechStoppedTimer) clearTimeout(speechStoppedTimer);
     speechStoppedTimer = setTimeout(() => {
       speechStoppedTimer = null;
-      const pendingUserText =
+      const rawPending =
         pendingUserTranscript.replace(/\s+/g, " ").trim() || lastCompletedUserTranscript;
       pendingUserTranscript = "";
       lastCompletedUserTranscript = "";
+      const pendingUserText = sanitizeUserSpeech(rawPending);
       options.onSpeechStopped?.({
         pendingUserText,
         transcript: buildLiveTranscript(),
@@ -543,6 +738,7 @@ export function createRealtimeInterviewController(options) {
     ) {
       const delta = typeof payload?.delta === "string" ? payload.delta : "";
       if (delta) {
+        muteMicForAssistantEcho();
         pendingAssistantTranscript += delta;
         emitTranscript();
       }
@@ -553,7 +749,9 @@ export function createRealtimeInterviewController(options) {
       type === "input_audio_transcription.completed"
     ) {
       const text = readRealtimeTranscriptText(payload);
-      if (text) lastCompletedUserTranscript = text.replace(/\s+/g, " ").trim();
+      if (text) {
+        lastCompletedUserTranscript = sanitizeUserSpeech(text.replace(/\s+/g, " ").trim());
+      }
       pendingUserTranscript = "";
       return;
     }
@@ -585,6 +783,7 @@ export function createRealtimeInterviewController(options) {
     }
     if (eventType === "response.created") {
       pendingAssistantTranscript = "";
+      muteMicForAssistantEcho();
       setStatus("Assistent antwoordt…");
       options.onResponseStarted?.();
       return;
@@ -598,12 +797,23 @@ export function createRealtimeInterviewController(options) {
     }
     if (eventType === "response.done") {
       pendingAssistantTranscript = "";
+      clearOpeningResponseWatchdog();
+      restoreMicAfterAssistantEcho();
       setStatus("Luistert…");
       emitTranscript();
       const status = typeof payload?.response?.status === "string" ? payload.response.status : "";
       if (status !== "cancelled" && status !== "incomplete") {
         options.onResponseDone?.();
       }
+      return;
+    }
+    if (eventType === "error") {
+      clearOpeningResponseWatchdog();
+      restoreMicAfterAssistantEcho();
+      if (isCaptureDialogueSession() && !turns.some((turn) => turn.role === "assistant")) {
+        setStatus("Fout bij correctiegesprek — probeer opnieuw.");
+      }
+      return;
     }
   };
 
@@ -624,7 +834,11 @@ export function createRealtimeInterviewController(options) {
         }
         return;
       }
-      maybeSendOpeningGreeting();
+      if (isCaptureDialogueSession()) {
+        sendOpeningGreeting();
+      } else {
+        maybeSendOpeningGreeting();
+      }
       scheduleOpeningGreetingFallback();
     });
     dataChannel.addEventListener("message", (event) => {
@@ -676,7 +890,9 @@ export function createRealtimeInterviewController(options) {
       if (!peer) return;
       emitDebug(`RTCPeerConnection state: ${peer.connectionState}`);
       if (peer.connectionState === "connected") {
-        if (!passiveListen) setStatus("Luistert…");
+        if (!passiveListen && !(isCaptureDialogueSession() && !openingGreetingSent)) {
+          setStatus("Luistert…");
+        }
       } else if (
         peer.connectionState === "failed" ||
         peer.connectionState === "disconnected"
@@ -746,6 +962,8 @@ export function createRealtimeInterviewController(options) {
     listenOnly = startOverrides.listenOnly ?? defaultListenOnly;
     correctionDialogue = startOverrides.correctionDialogue ?? defaultCorrectionDialogue;
     passiveListen = startOverrides.passiveListen ?? defaultPassiveListen;
+    captureDialogueKind = startOverrides.captureDialogueKind ?? null;
+    captureSeedRemainder = String(startOverrides.seedRemainder || "").trim();
     skipOpeningGreeting = startOverrides.skipOpeningGreeting === true;
     /** @type {MediaStream | null | undefined} */
     const prefetchedStream = startOverrides.prefetchedStream ?? null;
@@ -781,10 +999,13 @@ export function createRealtimeInterviewController(options) {
         setStatus(
           listenOnly
             ? "Spreek je correctie in…"
-            : correctionDialogue
+            : isCaptureDialogueSession()
               ? "Correctie bespreken…"
               : "Luistert…",
         );
+      }
+      if (isCaptureDialogueSession()) {
+        scheduleOpeningGreetingFallback();
       }
     } catch (err) {
       if (ownedPrefetchedStream) {

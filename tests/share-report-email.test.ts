@@ -251,8 +251,23 @@ describe("prepareShareReportEmail", () => {
 });
 
 describe("formatAttachmentShareSuccessMessage", () => {
-  it("vermeldt download en handmatige bijlage", () => {
-    const message = formatAttachmentShareSuccessMessage("gespreksverslag-test.docx");
+  it("vermeldt opslag en Outlook-bijlage", () => {
+    const message = formatAttachmentShareSuccessMessage({
+      filename: "gespreksverslag-test.pdf",
+      docxFilename: "gespreksverslag-test.docx",
+      mailOpened: true,
+      bezoekverslagenDir: "C:\\MegaMinnie\\Bezoekverslagen",
+    });
+    expect(message).toContain("Bezoekverslagen");
+    expect(message).toContain("Outlook geopend met PDF-bijlage");
+  });
+
+  it("vermeldt handmatige bijlage bij fallback", () => {
+    const message = formatAttachmentShareSuccessMessage({
+      filename: "gespreksverslag-test.pdf",
+      docxFilename: "gespreksverslag-test.docx",
+      mailOpened: false,
+    });
     expect(message).toContain("gedownload");
     expect(message).toContain("mailprogramma");
   });
