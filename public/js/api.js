@@ -28,6 +28,23 @@ export async function apiGetBlob(path, options = {}) {
   return res.blob();
 }
 
+function isNetworkFetchError(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /failed to fetch|networkerror|load failed|network request failed/i.test(msg);
+}
+
+/** @param {unknown} err */
+export function formatApiNetworkError(err) {
+  if (isNetworkFetchError(err)) {
+    return (
+      "Geen verbinding met MegaMinnie (time-out of netwerk). " +
+      "Controleer je internet en of de server nog draait. " +
+      "Lange gespreksopnames kunnen enkele minuten duren — probeer opnieuw."
+    );
+  }
+  return err instanceof Error ? err.message : String(err ?? "Onbekende fout");
+}
+
 /** @param {string} path @param {RequestInit} [options] */
 export async function apiPost(path, options = {}) {
   const headers = authHeaders(
@@ -36,7 +53,12 @@ export async function apiPost(path, options = {}) {
       : { ...(options.headers ?? {}) },
   );
 
-  const res = await fetch(path, { ...options, headers, cache: "no-store" });
+  let res;
+  try {
+    res = await fetch(path, { ...options, headers, cache: "no-store" });
+  } catch (err) {
+    throw new Error(formatApiNetworkError(err));
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Fout ${res.status}`);
   return data;

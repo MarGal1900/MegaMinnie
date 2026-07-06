@@ -29,7 +29,12 @@ export async function checkSalesforceConnection(
   }
 
   try {
-    const conn = await getSalesforceConnection();
+    const conn = await Promise.race([
+      getSalesforceConnection(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Salesforce-login time-out (10 s)")), 10_000),
+      ),
+    ]);
     const identity = conn.userInfo as { id?: string; organizationId?: string } | undefined;
     lastCheck = { at: now, reachable: true };
     return {

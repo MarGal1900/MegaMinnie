@@ -3,7 +3,7 @@
  * MediaRecorder + chunk-splitting + sequentiële transcriptie + Claude-naverwerking.
  */
 
-import { apiPost, formFields } from "./api.js";
+import { apiPost, formFields, formatApiNetworkError } from "./api.js";
 import {
   alertMicrophoneError,
   buildMicrophoneConstraints,
@@ -13,8 +13,9 @@ import {
   resumeAudioContext,
 } from "./media-permissions.js";
 
-/** Ruimte onder 25 MB multer-limiet. */
-const MAX_CHUNK_BYTES = 24 * 1024 * 1024;
+/** Max. chunkgrootte per upload (Vercel serverless-limiet ~4,5 MB; lokaal multer tot 25 MB). */
+export const MAX_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
+const MAX_CHUNK_BYTES = MAX_UPLOAD_CHUNK_BYTES;
 const SEGMENT_ROLLOVER_BYTES = 20 * 1024 * 1024;
 /** OpenAI gpt-4o-transcribe-diarize: ~1400 s per chunk; rollover vóór die limiet. */
 export const SEGMENT_ROLLOVER_SECONDS = 1200;
@@ -368,6 +369,12 @@ export function splitAudioBlob(blob) {
   return parts;
 }
 
+/** @param {unknown} err */
+function isRetryableTranscribeError(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /geen verbinding|time-out|netwerk|failed to fetch|network/i.test(msg);
+}
+
 /**
  * @param {Blob[]} segments
  * @param {AbortSignal} [signal]
@@ -409,12 +416,28 @@ async function transcribeSegments(segments, signal) {
       Math.round(((uploadIndex - 1) / allChunks.length) * 45 + 5),
       Math.round((uploadIndex / allChunks.length) * 48),
       Math.max(8000, Math.min(120000, blob.size / 40)),
-      () =>
-        apiPost("/api/visit-report/conversation/transcribe", {
-          method: "POST",
-          body: fd,
-          signal,
-        }),
+      async () => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            return await apiPost("/api/visit-report/conversation/transcribe", {
+              method: "POST",
+              body: fd,
+              signal,
+            });
+          } catch (err) {
+            if (attempt === 0 && !signal.aborted && isRetryableTranscribeError(err)) {
+              deps.setStatus(
+                `Deel ${uploadIndex}/${allChunks.length} opnieuw proberen…`,
+                "transcribe",
+              );
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+            throw err;
+          }
+        }
+        throw new Error("Transcriptie mislukt");
+      },
     );
 
     if (typeof result.text === "string" && result.text.trim()) {
@@ -480,7 +503,7 @@ async function processConversationSegments(segments) {
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") return;
     deps.setBusy(false);
-    deps.onError(err instanceof Error ? err.message : "Verwerken mislukt");
+    deps.onError(formatApiNetworkError(err));
     resetConversationState();
     deps.showPanel(false);
   }

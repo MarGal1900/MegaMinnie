@@ -54,12 +54,12 @@ describe("splitAudioBlob", () => {
     expect(splitAudioBlob(blob)).toEqual([blob]);
   });
 
-  it("splitst blobs groter dan 24 MB", () => {
-    const size = 25 * 1024 * 1024;
+  it("splitst blobs groter dan 4 MB", () => {
+    const size = 5 * 1024 * 1024;
     const blob = new Blob([new Uint8Array(size)], { type: "audio/webm" });
     const parts = splitAudioBlob(blob);
     expect(parts.length).toBe(2);
-    expect(parts[0].size).toBe(24 * 1024 * 1024);
+    expect(parts[0].size).toBe(4 * 1024 * 1024);
     expect(parts[1].size).toBe(1024 * 1024);
   });
 });

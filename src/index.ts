@@ -24,7 +24,7 @@ import { voiceRouter } from "./routes/voice.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
-const host = process.env.HOST ?? "127.0.0.1";
+const host = process.env.HOST ?? (process.env.VERCEL ? "127.0.0.1" : "0.0.0.0");
 const publicDir = path.join(process.cwd(), "public");
 
 app.use(express.json({ limit: "2mb" }));
